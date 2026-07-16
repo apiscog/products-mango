@@ -1,9 +1,15 @@
-FROM gradle:8.5.0-jdk21 AS build
-COPY --chown=gradle:gradle . /home/gradle/project
-WORKDIR /home/gradle/project
-RUN gradle clean build
-
-FROM eclipse-temurin:21-jdk
+FROM eclipse-temurin:21-jdk AS build
 WORKDIR /app
-COPY --from=build /home/gradle/project/build/libs/*.jar app.jar
+COPY pom.xml mvnw ./
+COPY .mvn .mvn
+RUN sed -i 's/\r$//' mvnw \
+    && chmod +x mvnw \
+    && ./mvnw dependency:go-offline
+COPY src src
+RUN ./mvnw clean package -DskipTests
+
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+COPY --from=build /app/target/*.jar app.jar
+EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "app.jar"]

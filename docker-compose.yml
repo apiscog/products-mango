@@ -8,8 +8,6 @@ services:
     container_name: product-api
     ports:
       - "8080:8080"
-    command: >
-      java -cp app.jar com.mango.App
     deploy:
       resources:
         limits:
