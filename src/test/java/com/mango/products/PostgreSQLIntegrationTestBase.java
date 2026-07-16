@@ -1,25 +1,37 @@
 package com.mango.products;
 
+import org.junit.jupiter.api.BeforeEach;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 @SpringBootTest
-@Testcontainers
 public abstract class PostgreSQLIntegrationTestBase {
 
-	@Container
-	static final PostgreSQLContainer<?> POSTGRESQL =
+	private static final PostgreSQLContainer<?> POSTGRESQL =
 			new PostgreSQLContainer<>("postgres:17-alpine");
+
+	static {
+		POSTGRESQL.start();
+	}
+
+	@Autowired
+	private JdbcTemplate jdbcTemplate;
 
 	@DynamicPropertySource
 	static void configurePostgreSQL(DynamicPropertyRegistry registry) {
 		registry.add("spring.datasource.url", POSTGRESQL::getJdbcUrl);
 		registry.add("spring.datasource.username", POSTGRESQL::getUsername);
 		registry.add("spring.datasource.password", POSTGRESQL::getPassword);
+	}
+
+	@BeforeEach
+	protected void cleanDatabase() {
+		jdbcTemplate.update("DELETE FROM prices");
+		jdbcTemplate.update("DELETE FROM products");
 	}
 
 }
