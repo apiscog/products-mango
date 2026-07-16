@@ -1,6 +1,29 @@
-version: "3.9"
-
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: products-postgres
+    environment:
+      POSTGRES_DB: products
+      POSTGRES_USER: products
+      POSTGRES_PASSWORD: products
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U products -d products"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
   app:
     build:
       context: .
@@ -8,6 +31,19 @@ services:
     container_name: product-api
     ports:
       - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/products
+      SPRING_DATASOURCE_USERNAME: products
+      SPRING_DATASOURCE_PASSWORD: products
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
     deploy:
       resources:
         limits:
@@ -23,7 +59,8 @@ services:
       dockerfile: Dockerfile.benchmark
     container_name: product-benchmark
     depends_on:
-      - app
+      app:
+        condition: service_healthy
     command: sh -c "chmod +x /app/benchmark.sh && /app/benchmark.sh"
     deploy:
       resources:
@@ -33,3 +70,6 @@ services:
         reservations:
           cpus: '0.25'
           memory: 256M
+
+volumes:
+  postgres-data:
