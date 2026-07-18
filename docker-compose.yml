@@ -24,6 +24,26 @@ services:
           cpus: '0.25'
           memory: 256M
 
+  redis:
+    image: redis:7.4.9-alpine
+    container_name: products-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "192mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
   app:
     build:
       context: .
@@ -35,8 +55,12 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/products
       SPRING_DATASOURCE_USERNAME: products
       SPRING_DATASOURCE_PASSWORD: products
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1"]
