@@ -54,14 +54,22 @@ services:
           memory: 512M
 
   benchmark:
-    build:
-      context: .
-      dockerfile: Dockerfile.benchmark
+    image: grafana/k6:1.7.1
     container_name: product-benchmark
+    profiles: ["benchmark"]
     depends_on:
       app:
         condition: service_healthy
-    command: sh -c "chmod +x /app/benchmark.sh && /app/benchmark.sh"
+    environment:
+      BASE_URL: ${BASE_URL:-http://app:8080}
+      WARMUP_DURATION: ${WARMUP_DURATION:-10s}
+      RAMP_UP_DURATION: ${RAMP_UP_DURATION:-15s}
+      TEST_DURATION: ${TEST_DURATION:-30s}
+      COOLDOWN_DURATION: ${COOLDOWN_DURATION:-10s}
+      TARGET_RATE: ${TARGET_RATE:-20}
+    volumes:
+      - ./performance/products-load-test.js:/scripts/products-load-test.js:ro
+    command: ["run", "/scripts/products-load-test.js"]
     deploy:
       resources:
         limits:
