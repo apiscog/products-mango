@@ -1,220 +1,178 @@
-# Performance baseline
+# Benchmark de rendimiento corregido
 
-## Objective and measured architecture
+## Objetivo
 
-This benchmark measures the four mandatory API operations through the complete request path:
+El benchmark conserva k6 como herramienta, pero reproduce exclusivamente las operaciones, datos,
+orden y cantidades de `benchmark.sh` incluido originalmente en el challenge:
 
 ```text
 k6 -> Products API -> PostgreSQL
 ```
 
-The goal is a reproducible local baseline, not a production SLA. Results depend on the host hardware,
-Docker Desktop allocation, background workload, filesystem and operating system.
+El Bash original lanzaba un proceso `curl` en segundo plano por petición. La traducción a k6 conserva
+el volumen funcional y la intención concurrente, sustituyendo los procesos del sistema por VUs
+controlables y contadores verificables. Estos resultados son una referencia local, no un SLA.
 
-Grafana k6 was selected because it provides controlled arrival rates, checks, tags, percentiles,
-threshold-based exit codes and a small official Docker image. The benchmark pins `grafana/k6:1.7.1`
-instead of requiring a local k6 installation.
+## Escenario reproducido
 
-## How to run
+### Preparación funcional
 
-PowerShell, from the repository root:
+Una fase `setup` separada:
+
+1. espera `GET /actuator/health` con respuesta `200` y `status=UP`;
+2. crea exactamente un producto `Zapatillas deportivas`;
+3. crea exactamente los precios `99.99` (enero-junio 2024), `129.99` (julio-diciembre 2024) y
+   `199.99` (desde enero 2025, sin final);
+4. consulta exactamente `2024-04-15`, `2024-08-15`, `2025-03-01` y el historial.
+
+El identificador se extrae del JSON y se pasa a las fases de lectura. La preparación genera ocho
+peticiones funcionales más una petición de health cuando la aplicación ya está disponible. Sus
+métricas se etiquetan como `setup` y no se mezclan con los conteos de carga.
+
+### Fases de carga
+
+Las fases se ejecutan secuencialmente mediante cuatro procesos k6 coordinados por
+`performance/run-benchmark.sh`:
+
+| Orden | Fase | Operación | Cantidad exacta | VUs por defecto |
+|---:|---|---|---:|---:|
+| 1 | `product-creation` | `POST /products` | 1.000 | 100 |
+| 2 | `price-query` | `GET /products/{id}/prices?date=2024-04-15` | 20.000 | 500 |
+| 3 | `history-query` | `GET /products/{id}/prices` | 15.000 | 500 |
+
+Cada fase usa `shared-iterations`: los VUs reparten trabajo concurrente, pero no cambian el total. No
+hay arrival rate, mezcla ponderada, fechas aleatorias ni altas de precios durante la carga. Los 1.000
+productos usan `<n>` de 1 a 1.000, son únicos dentro de la ejecución y no reciben precios. Repetirlos
+con un volumen conservado es válido porque el nombre de producto no tiene una restricción de unicidad.
+
+## Ejecución
 
 ```powershell
 docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
 ```
 
-The `benchmark` profile keeps ordinary local startup independent:
+Variables configurables:
 
-```powershell
-docker compose up -d postgres app
-```
-
-Configuration can be overridden before running Compose:
-
-```powershell
-$env:TARGET_RATE='30'; $env:TEST_DURATION='45s'; docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
-```
-
-Supported variables and defaults:
-
-| Variable | Default | Meaning |
+| Variable | Predeterminado | Efecto |
 |---|---:|---|
-| `BASE_URL` | `http://app:8080` | API address inside the Compose network |
-| `WARMUP_DURATION` | `10s` | Initial low-rate phase |
-| `RAMP_UP_DURATION` | `15s` | Progressive increase to the target |
-| `TEST_DURATION` | `30s` | Stable target-rate phase |
-| `COOLDOWN_DURATION` | `10s` | Progressive decrease to zero |
-| `TARGET_RATE` | `20` | Total target iterations per second; minimum 4 |
+| `BASE_URL` | `http://app:8080` | API dentro de la red Compose |
+| `PRODUCT_CREATION_VUS` | `100` | concurrencia de las 1.000 altas |
+| `PRICE_QUERY_VUS` | `500` | concurrencia de las 20.000 consultas de precio |
+| `HISTORY_QUERY_VUS` | `500` | concurrencia de los 15.000 historiales |
 
-The default load phase lasts 65 seconds, plus HTTP setup and a maximum 5-second graceful stop.
-The stable target-rate distribution is:
+Ejemplo PowerShell, sin alterar las cantidades:
 
-| Scenario | Rate | Distribution |
-|---|---:|---:|
-| Current price | 15 iterations/s | 75% |
-| History | 3 iterations/s | 15% |
-| Create product | 1 iteration/s | 5% |
-| Add price | 1 iteration/s | 5% |
+```powershell
+$env:PRICE_QUERY_VUS='250'; $env:HISTORY_QUERY_VUS='250'; docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
+```
 
-The warm-up uses at least one iteration/s per scenario, so the distribution over the complete ramp is
-approximately 72% / 15% / 6% / 6%. The stable phase is exactly 75% / 15% / 5% / 5%.
-
-## Data preparation and repeatability
-
-`setup()` first verifies `/actuator/health`, then creates eight products with these non-overlapping
-periods:
-
-- `2024-01-01` to `2024-06-30`;
-- `2024-07-01` to `2024-12-31`;
-- `2025-01-01` to `null`.
-
-It also creates a calculated pool of products for the add-price scenario. Each load iteration consumes
-a different product, so additions measure successful writes instead of overlap conflicts. All data is
-created through the REST API and every run uses a timestamp-based `runId`.
-
-Each execution adds products and prices to PostgreSQL. Repeated execution with the same volume is
-supported. For an explicitly clean database, run this manually before the benchmark:
+Cada ejecución añade datos. La limpieza completa es opcional y explícita:
 
 ```powershell
 docker compose --profile benchmark down -v
 ```
 
-The k6 script never deletes data and never connects directly to PostgreSQL.
+## Validaciones y métricas
 
-## Checks, metrics and thresholds
+Cada petición valida el status esperado, Content-Type JSON, JSON legible, contrato mínimo y ausencia
+de 5xx. Los contadores `product_creation_requests`, `price_query_requests` y
+`history_query_requests` tienen thresholds exactos de 1.000, 20.000 y 15.000.
 
-Every load operation checks the expected status, JSON content type, valid JSON, required response
-fields and absence of 5xx responses. Setup aborts immediately if health, product creation, price
-creation or JSON contracts are invalid.
+Thresholds funcionales:
 
-Dynamic IDs are normalized with fixed request names and the tags `endpoint` and `phase`. In addition
-to native k6 metrics, the script records:
+- cero códigos inesperados;
+- cero errores 5xx;
+- cero contratos inválidos;
+- cero iteraciones descartadas;
+- más del 99% de checks y éxito de negocio;
+- menos del 1% de `http_req_failed` en cada fase de carga.
 
-- `unexpected_status_codes`;
-- `server_errors`;
-- `business_success`;
-- `current_price_duration`;
-- `history_duration`;
-- `write_duration`.
+No se fija un límite de latencia como requisito del challenge. k6 muestra por separado duración,
+throughput, avg, mediana, p90, p95, p99 y máximo para cada fase.
 
-Initial local thresholds:
+## Entorno de referencia
 
-| Metric | Threshold |
-|---|---|
-| `http_req_failed` | rate `< 1%` |
-| `checks` | rate `> 99%` |
-| `business_success` | rate `> 99%` |
-| `server_errors` | count `== 0` |
-| `unexpected_status_codes` | count `== 0` |
-| `dropped_iterations` | count `== 0` |
-| Current-price p95 | `< 500 ms` |
-| History p95 | `< 750 ms` |
-| Write p95 | `< 1000 ms` |
+- Fecha: 2026-07-19.
+- Host: Windows 10 Home 64-bit, versión 10.0.19045.
+- Docker Desktop: engine 29.6.1, Linux x86_64.
+- Recursos visibles a Docker: 12 CPUs y aproximadamente 7,32 GiB.
+- Límites Compose: API 1 CPU/1 GiB, PostgreSQL 0,5 CPU/1 GiB, k6 1 CPU/1 GiB.
+- Imágenes: `postgres:17-alpine` (PostgreSQL 17.10) y `grafana/k6:1.7.1`.
+- Concurrencia: 100/500/500 VUs.
 
-k6 exits with a non-zero status when any threshold fails.
+## Resultados
 
-## Reference environment
+### Ejecución 1: volumen limpio
 
-- Date: 2026-07-18.
-- Host: Microsoft Windows 10 Home 64-bit, version 10.0.19045.
-- Docker Desktop engine: 29.6.1, Linux x86_64.
-- Resources visible to Docker: 12 CPUs and approximately 7.32 GiB memory.
-- Compose limits: app 1 CPU / 1 GiB; PostgreSQL 0.5 CPU / 1 GiB; k6 1 CPU / 1 GiB.
-- PostgreSQL image observed: PostgreSQL 17.10 from `postgres:17-alpine`.
-- k6 image: `grafana/k6:1.7.1`.
+| Fase | Requests | Duración pared | Throughput | Errores | Checks |
+|---|---:|---:|---:|---:|---:|
+| Product creation | 1.000 | 3 s | 379,65 req/s | 0% | 5.000/5.000 |
+| Price query | 20.000 | 18 s | 1.118,97 req/s | 0% | 100.000/100.000 |
+| History query | 15.000 | 16 s | 949,08 req/s | 0% | 75.000/75.000 |
 
-## Results
-
-Both runs used the default profile. Native HTTP totals include the 125 setup requests; iteration totals
-represent load scenarios.
-
-### Run 1: clean volume
-
-| Metric | Result |
-|---|---:|
-| k6 measured duration | 66.4 s |
-| HTTP requests | 1,076 |
-| HTTP throughput | 16.20 requests/s |
-| Load iterations | 951 |
-| Failed HTTP requests | 0.00% |
-| Checks | 5,003 / 5,003 (100%) |
-| Business success | 951 / 951 (100%) |
-| Dropped iterations | 0 |
-| Unexpected statuses | 0 |
-| Server errors | 0 |
-| Benchmark exit code | 0 |
-
-| Trend | avg | median | p90 | p95 | p99 | max |
+| Fase | avg | mediana | p90 | p95 | p99 | máximo |
 |---|---:|---:|---:|---:|---:|---:|
-| All HTTP | 4.71 ms | 2.74 ms | 4.68 ms | 6.46 ms | 55.91 ms | 378.55 ms |
-| Current price | 2.56 ms | 2.37 ms | 3.45 ms | 3.76 ms | 5.08 ms | 13.12 ms |
-| History | 3.82 ms | 3.46 ms | 4.92 ms | 5.23 ms | 6.06 ms | 30.06 ms |
-| Writes | 11.53 ms | 4.18 ms | 40.04 ms | 55.12 ms | 62.06 ms | 63.15 ms |
+| Product creation | 248,21 ms | 208,97 ms | 405,92 ms | 498,26 ms | 692,19 ms | 998,40 ms |
+| Price query | 435,51 ms | 299,40 ms | 864,28 ms | 1,10 s | 1,69 s | 4,29 s |
+| History query | 513,90 ms | 400,62 ms | 907,46 ms | 1,12 s | 1,62 s | 2,99 s |
 
-Representative `docker stats --no-stream` samples during load:
+- Setup: 8 peticiones funcionales + 1 health; 44/44 checks.
+- Carga total exacta: 36.000 peticiones.
+- Duración total aproximada: 38 segundos.
+- Códigos inesperados, 5xx e iteraciones descartadas: 0.
+- Exit code: 0.
 
-| Container | CPU observed | Memory observed |
-|---|---:|---:|
-| Products API | approximately 1.5-7.1% | approximately 316-322 MiB |
-| PostgreSQL | approximately 0.4-0.7% | approximately 55-56 MiB |
-| k6 | approximately 0.5-1.8% | approximately 20 MiB |
+Muestras puntuales durante las lecturas:
 
-Application startup reported by Spring took 7.6 seconds. From initial Compose container startup until
-the application became healthy and k6 could start setup was approximately 15-17 seconds. This is a
-local approximate availability measurement, not a controlled cold-start benchmark.
+| Fase | API CPU/memoria | PostgreSQL CPU/memoria | k6 CPU/memoria |
+|---|---|---|---|
+| Product creation | 100,86% / 336,70 MiB | 8,81% / 76,84 MiB | 13,19% / 50,96 MiB |
+| Price query | 104,45% / 365,40 MiB | 10,86% / 80,53 MiB | 13,70% / 179,40 MiB |
+| History query | 103,32% / 422,00 MiB | 19,27% / 83,05 MiB | 25,94% / 197,20 MiB |
 
-### Run 2: preserved PostgreSQL volume
+### Ejecución 2: volumen conservado
 
-| Metric | Result |
-|---|---:|
-| k6 measured duration | 66.3 s |
-| HTTP requests | 1,080 |
-| HTTP throughput | 16.29 requests/s |
-| Load iterations | 955 |
-| Failed HTTP requests | 0.00% |
-| Checks | 5,023 / 5,023 (100%) |
-| Business success | 955 / 955 (100%) |
-| Dropped iterations | 0 |
-| Unexpected statuses | 0 |
-| Server errors | 0 |
-| Benchmark exit code | 0 |
+El setup recuperó un nuevo ID (`1002`), demostrando repetibilidad sin limpiar PostgreSQL.
 
-| Trend | avg | median | p90 | p95 | p99 | max |
+| Fase | Requests | Duración pared | Throughput | Errores | Checks |
+|---|---:|---:|---:|---:|---:|
+| Product creation | 1.000 | 3 s | 396,92 req/s | 0% | 5.000/5.000 |
+| Price query | 20.000 | 19 s | 1.081,80 req/s | 0% | 100.000/100.000 |
+| History query | 15.000 | 16 s | 914,83 req/s | 0% | 75.000/75.000 |
+
+| Fase | avg | mediana | p90 | p95 | p99 | máximo |
 |---|---:|---:|---:|---:|---:|---:|
-| All HTTP | 3.96 ms | 2.87 ms | 4.45 ms | 5.24 ms | 9.15 ms | 481.39 ms |
-| Current price | 2.73 ms | 2.61 ms | 3.50 ms | 3.75 ms | 4.60 ms | 12.06 ms |
-| History | 4.09 ms | 3.66 ms | 5.08 ms | 5.61 ms | 7.49 ms | 27.11 ms |
-| Writes | 4.17 ms | 4.07 ms | 5.15 ms | 5.45 ms | 6.30 ms | 7.61 ms |
+| Product creation | 236,07 ms | 205,70 ms | 404,61 ms | 498,65 ms | 699,43 ms | 1,00 s |
+| Price query | 451,07 ms | 301,54 ms | 895,46 ms | 1,10 s | 1,80 s | 4,19 s |
+| History query | 532,19 ms | 406,39 ms | 986,42 ms | 1,20 s | 1,70 s | 3,90 s |
 
-Representative second-run load sample:
+- Setup: 8 peticiones funcionales + 1 health; 44/44 checks.
+- Carga total exacta: 36.000 peticiones.
+- Duración total aproximada: 39 segundos.
+- Códigos inesperados, 5xx e iteraciones descartadas: 0.
+- Exit code: 0.
 
-| Container | CPU | Memory |
-|---|---:|---:|
-| Products API | 8.42% | 271.1 MiB |
-| PostgreSQL | 2.77% | 40.42 MiB |
-| k6 | 1.92% | 19.93 MiB |
+Muestras puntuales:
 
-Spring reported 7.2 seconds for application startup. The preserved volume produced no setup conflicts,
-unexpected statuses or failed checks.
+| Fase | API CPU/memoria | PostgreSQL CPU/memoria | k6 CPU/memoria |
+|---|---|---|---|
+| Product creation | 100,06% / 280,90 MiB | 9,30% / 39,35 MiB | 27,13% / 76,25 MiB |
+| Price query | 104,06% / 339,00 MiB | 11,08% / 43,57 MiB | 14,39% / 146,10 MiB |
+| History query | 101,20% / 377,70 MiB | 15,80% / 45,09 MiB | 26,79% / 175,20 MiB |
 
-## Analysis and optimization decision
+## Análisis
 
-All thresholds passed with substantial margin in both runs. No request failed, no iteration was
-dropped, no unexpected status or 5xx response occurred, and application/PostgreSQL logs contained no
-errors. CPU and memory samples show no saturation relative to the configured limits. Read latency was
-stable between runs; the first-run write tail was higher but still small and did not reproduce after
-the initial database run.
+Las dos ejecuciones reprodujeron exactamente las cantidades originales y fueron repetibles sobre un
+volumen persistente. Los 500 VUs de lectura mantienen ocupada aproximadamente una CPU completa de la
+API, coherente con el límite Compose, pero no provocaron errores, descartes ni respuestas inválidas.
+No se modificó producción ni se aplicó ninguna optimización.
 
-There is therefore no evidence supporting a production optimization in this iteration. HikariCP, JVM
-flags, SQL, indexes, logging and application code remain unchanged. This preserves the measured
-baseline and follows the rule to optimize only after a reproducible bottleneck is observed.
+## Limitaciones
 
-## Limitations
-
-- This is a short local baseline, not a soak, stress, capacity or production-network test.
-- `docker stats` values are point-in-time samples, not peak or time-series measurements.
-- Setup requests are included in native aggregate HTTP metrics; custom endpoint trends represent load.
-- The arrival-rate profile controls requests, but the minimum one request/s during warm-up slightly
-  increases the write share over the complete run.
-- Cold-start timing is approximate and includes Docker orchestration and healthcheck polling.
-- Results must not be generalized to other hardware or Docker allocations.
+- Es una prueba local corta, no un soak test ni una estimación universal de capacidad.
+- `docker stats` son muestras puntuales y pueden superar ligeramente 100% por el intervalo de muestreo.
+- `shared-iterations` conserva el volumen y concurrencia de forma reproducible, pero no intenta iniciar
+  literalmente miles de procesos a la vez como el bucle Bash.
+- La duración de pared del orquestador se mide con resolución de un segundo; k6 ofrece las tasas y
+  latencias precisas por fase.
+- Los resultados dependen del hardware, Docker Desktop y carga local.

@@ -62,14 +62,13 @@ services:
         condition: service_healthy
     environment:
       BASE_URL: ${BASE_URL:-http://app:8080}
-      WARMUP_DURATION: ${WARMUP_DURATION:-10s}
-      RAMP_UP_DURATION: ${RAMP_UP_DURATION:-15s}
-      TEST_DURATION: ${TEST_DURATION:-30s}
-      COOLDOWN_DURATION: ${COOLDOWN_DURATION:-10s}
-      TARGET_RATE: ${TARGET_RATE:-20}
+      PRODUCT_CREATION_VUS: ${PRODUCT_CREATION_VUS:-100}
+      PRICE_QUERY_VUS: ${PRICE_QUERY_VUS:-500}
+      HISTORY_QUERY_VUS: ${HISTORY_QUERY_VUS:-500}
     volumes:
       - ./performance/products-load-test.js:/scripts/products-load-test.js:ro
-    command: ["run", "/scripts/products-load-test.js"]
+      - ./performance/run-benchmark.sh:/scripts/run-benchmark.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/run-benchmark.sh"]
     deploy:
       resources:
         limits:
