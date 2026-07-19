@@ -1,9 +1,12 @@
 #!/bin/sh
 
-set -eu
+set -euo pipefail
 
 SCRIPT=/scripts/products-load-test.js
+SETUP_LOG=/tmp/setup.log
 TOTAL_START="$(date +%s)"
+
+trap 'rm -f "$SETUP_LOG"' EXIT
 
 run_phase() {
   mode="$1"
@@ -24,13 +27,13 @@ run_phase() {
 }
 
 echo "Running functional setup"
-if ! k6 run -e MODE=setup "$SCRIPT" > /tmp/setup.log 2>&1; then
-  cat /tmp/setup.log
+if ! k6 run -e MODE=setup "$SCRIPT" > "$SETUP_LOG" 2>&1; then
+  cat "$SETUP_LOG"
   exit 1
 fi
-cat /tmp/setup.log
+cat "$SETUP_LOG"
 
-PRODUCT_ID="$(grep -o 'SETUP_PRODUCT_ID=[0-9][0-9]*' /tmp/setup.log | tail -n 1 | cut -d= -f2)"
+PRODUCT_ID="$(grep -o 'SETUP_PRODUCT_ID=[0-9][0-9]*' "$SETUP_LOG" | tail -n 1 | cut -d= -f2)"
 if [ -z "$PRODUCT_ID" ]; then
   echo "Could not extract SETUP_PRODUCT_ID from k6 setup output" >&2
   exit 1
