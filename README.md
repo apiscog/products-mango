@@ -307,9 +307,10 @@ Estos totales son una referencia y pueden crecer con la suite.
 
 ## Benchmark de rendimiento
 
-El benchmark mide `k6 -> Products API -> PostgreSQL` y reproduce el escenario de `benchmark.sh`
-proporcionado con el challenge. Utiliza `grafana/k6:1.7.1`, no requiere instalar k6 localmente y
-permanece bajo el profile `benchmark`.
+El benchmark reproduce el escenario de `benchmark.sh` proporcionado con el challenge. En `master`
+mide `k6 -> Products API -> PostgreSQL`; esta rama bonus mantiene exactamente el mismo escenario y
+mide `k6 -> Products API -> Redis / PostgreSQL`. Utiliza `grafana/k6:1.7.1`, no requiere instalar k6
+localmente y permanece bajo el profile `benchmark`.
 
 ```bash
 docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
@@ -349,6 +350,10 @@ Dos ejecuciones locales —la segunda conservando el volumen— completaron exac
 1.000/20.000/15.000 peticiones, 100 % de checks y 0 % de errores en unos 38 segundos. Con 500 VUs, la
 API utilizó aproximadamente su límite de una CPU. Los percentiles, consumo y limitaciones están en
 [docs/performance-results.md](docs/performance-results.md); no son un SLA ni una predicción universal.
+
+La comparación equivalente de esta rama con Redis, incluidos TTL, claves, invalidación, fail-open y
+recursos, está en [docs/redis-cache-results.md](docs/redis-cache-results.md). Redis es una mejora bonus;
+la entrega base de `master` no lo requiere.
 
 Cada ejecución añade datos únicos al volumen. Para repetir desde una base vacía, debe ejecutarse
 explícitamente `docker compose down -v`; el script k6 no elimina datos ni accede directamente a
