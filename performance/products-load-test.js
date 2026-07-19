@@ -1,294 +1,310 @@
 import http from 'k6/http';
 import exec from 'k6/execution';
-import { check, fail } from 'k6';
+import { check, fail, sleep } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
 
 const BASE_URL = __ENV.BASE_URL || 'http://app:8080';
-const WARMUP_DURATION = __ENV.WARMUP_DURATION || '10s';
-const RAMP_UP_DURATION = __ENV.RAMP_UP_DURATION || '15s';
-const TEST_DURATION = __ENV.TEST_DURATION || '30s';
-const COOLDOWN_DURATION = __ENV.COOLDOWN_DURATION || '10s';
-const TARGET_RATE = numberFromEnvironment('TARGET_RATE', 20, 4);
+const MODE = __ENV.MODE || 'setup';
 
-const historyRate = Math.max(1, Math.round(TARGET_RATE * 0.15));
-const createProductRate = Math.max(1, Math.round(TARGET_RATE * 0.05));
-const addPriceRate = Math.max(1, Math.round(TARGET_RATE * 0.05));
-const currentPriceRate = TARGET_RATE - historyRate - createProductRate - addPriceRate;
+const PRODUCT_CREATION_ITERATIONS = 1000;
+const PRICE_QUERY_ITERATIONS = 20000;
+const HISTORY_QUERY_ITERATIONS = 15000;
 
-if (currentPriceRate < 1) {
-    throw new Error('TARGET_RATE must leave at least one request per second for current-price');
-}
-
-const totalDurationSeconds = [
-    WARMUP_DURATION,
-    RAMP_UP_DURATION,
-    TEST_DURATION,
-    COOLDOWN_DURATION,
-].map(durationToSeconds).reduce((total, duration) => total + duration, 0);
-
-const addPriceProductCount = Math.ceil(addPriceRate * totalDurationSeconds * 1.25) + 10;
+const SETUP_PRODUCT_NAME = 'Zapatillas deportivas';
+const SETUP_PRODUCT_DESCRIPTION = 'Modelo 2025 edición limitada';
+const SETUP_PRICES = [
+    { value: 99.99, initDate: '2024-01-01', endDate: '2024-06-30' },
+    { value: 129.99, initDate: '2024-07-01', endDate: '2024-12-31' },
+    { value: 199.99, initDate: '2025-01-01', endDate: null },
+];
 
 export const unexpected_status_codes = new Counter('unexpected_status_codes');
 export const server_errors = new Counter('server_errors');
+export const invalid_contracts = new Counter('invalid_contracts');
 export const business_success = new Rate('business_success');
-export const current_price_duration = new Trend('current_price_duration', true);
-export const history_duration = new Trend('history_duration', true);
-export const write_duration = new Trend('write_duration', true);
+export const setup_business_requests = new Counter('setup_business_requests');
+export const setup_health_success = new Counter('setup_health_success');
+export const product_creation_requests = new Counter('product_creation_requests');
+export const price_query_requests = new Counter('price_query_requests');
+export const history_query_requests = new Counter('history_query_requests');
+export const product_creation_duration = new Trend('product_creation_duration', true);
+export const price_query_duration = new Trend('price_query_duration', true);
+export const history_query_duration = new Trend('history_query_duration', true);
 
-export const options = {
-    discardResponseBodies: false,
-    summaryTrendStats: ['avg', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
-    scenarios: {
-        current_price: scenario('currentPrice', currentPriceRate),
-        history: scenario('history', historyRate),
-        create_product: scenario('createProduct', createProductRate),
-        add_price: scenario('addPrice', addPriceRate),
-    },
-    thresholds: {
-        http_req_failed: ['rate<0.01'],
-        checks: ['rate>0.99'],
-        business_success: ['rate>0.99'],
-        server_errors: ['count==0'],
-        unexpected_status_codes: ['count==0'],
-        dropped_iterations: ['count==0'],
-        current_price_duration: ['p(95)<500'],
-        history_duration: ['p(95)<750'],
-        write_duration: ['p(95)<1000'],
-    },
-};
+export const options = optionsForMode(MODE);
 
-export function setup() {
-    const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const health = http.get(`${BASE_URL}/actuator/health`, requestTags(
-        'GET /actuator/health', 'health', 'setup'));
-    const healthBody = requiredJson(health, 'health response');
-    requireSetup(health.status === 200 && healthBody.status === 'UP',
-        `health check failed: status=${health.status}, body=${health.body}`);
+export function setupFlow() {
+    waitForHealthyApplication();
 
-    const readProducts = [];
-    for (let index = 0; index < 8; index += 1) {
-        const product = createSetupProduct(runId, `read-${index}`);
-        createSetupPrice(product.id, '99.99', '2024-01-01', '2024-06-30');
-        createSetupPrice(product.id, '129.99', '2024-07-01', '2024-12-31');
-        createSetupPrice(product.id, '199.99', '2025-01-01', null);
-        readProducts.push({
-            id: product.id,
-            name: product.name,
-            description: product.description,
-        });
-    }
-
-    const addPriceProductIds = [];
-    for (let index = 0; index < addPriceProductCount; index += 1) {
-        addPriceProductIds.push(createSetupProduct(runId, `price-${index}`).id);
-    }
-
-    console.log(`setup completed: runId=${runId}, readProducts=${readProducts.length}, `
-        + `addPriceProducts=${addPriceProductIds.length}, targetRate=${TARGET_RATE}`);
-    return { runId, readProducts, addPriceProductIds };
-}
-
-export function currentPrice(data) {
-    const product = data.readProducts[exec.scenario.iterationInTest % data.readProducts.length];
-    const dates = ['2024-04-15', '2024-09-15', '2030-01-01'];
-    const date = dates[exec.scenario.iterationInTest % dates.length];
-    const response = http.get(
-        `${BASE_URL}/products/${product.id}/prices?date=${date}`,
-        requestTags('GET /products/{id}/prices?date', 'current-price', 'load'),
+    const productResponse = http.post(
+        `${BASE_URL}/products`,
+        JSON.stringify({ name: SETUP_PRODUCT_NAME, description: SETUP_PRODUCT_DESCRIPTION }),
+        jsonRequest('POST /products [setup]', 'setup'),
     );
-    current_price_duration.add(response.timings.duration, { endpoint: 'current-price' });
+    setup_business_requests.add(1, { phase: 'setup' });
+    const product = parseJson(productResponse);
+    const validProduct = product !== null
+        && Number.isInteger(product.id) && product.id > 0
+        && product.name === SETUP_PRODUCT_NAME
+        && product.description === SETUP_PRODUCT_DESCRIPTION;
+    validateResponse(productResponse, 201, validProduct, 'setup', 'setup product');
+    requireSetup(validProduct, `could not create setup product: ${productResponse.body}`);
 
-    const body = optionalJson(response);
-    const valid = evaluateResponse(response, 200, 'current-price')
-        && body !== null
-        && exactFields(body, ['value'])
-        && typeof body.value === 'number';
-    check(response, {
-        'current-price: status is 200': (result) => result.status === 200,
-        'current-price: content type is JSON': hasJsonContentType,
-        'current-price: body is valid JSON': () => body !== null,
-        'current-price: body contains only numeric value': () => body !== null
-            && exactFields(body, ['value']) && typeof body.value === 'number',
-        'current-price: no server error': (result) => result.status < 500,
-    }, { endpoint: 'current-price', phase: 'load' });
-    business_success.add(valid, { endpoint: 'current-price' });
-}
+    for (const price of SETUP_PRICES) {
+        const response = http.post(
+            `${BASE_URL}/products/${product.id}/prices`,
+            JSON.stringify(price),
+            jsonRequest('POST /products/{id}/prices [setup]', 'setup'),
+        );
+        setup_business_requests.add(1, { phase: 'setup' });
+        const body = parseJson(response);
+        const valid = body !== null
+            && body.value === price.value
+            && body.initDate === price.initDate
+            && Object.prototype.hasOwnProperty.call(body, 'endDate')
+            && body.endDate === price.endDate;
+        validateResponse(response, 201, valid, 'setup', `setup price ${price.initDate}`);
+        requireSetup(valid && response.status === 201,
+            `could not create setup price ${price.initDate}: ${response.body}`);
+    }
 
-export function history(data) {
-    const product = data.readProducts[exec.scenario.iterationInTest % data.readProducts.length];
-    const response = http.get(
+    const expectedPrices = [99.99, 129.99, 199.99];
+    const dates = ['2024-04-15', '2024-08-15', '2025-03-01'];
+    for (let index = 0; index < dates.length; index += 1) {
+        const date = dates[index];
+        const response = http.get(
+            `${BASE_URL}/products/${product.id}/prices?date=${date}`,
+            request('GET /products/{id}/prices?date [setup]', 'setup'),
+        );
+        setup_business_requests.add(1, { phase: 'setup' });
+        const body = parseJson(response);
+        const valid = body !== null
+            && exactFields(body, ['value'])
+            && body.value === expectedPrices[index];
+        validateResponse(response, 200, valid, 'setup', `setup price query ${date}`);
+        requireSetup(valid && response.status === 200,
+            `setup price query failed for ${date}: ${response.body}`);
+    }
+
+    const historyResponse = http.get(
         `${BASE_URL}/products/${product.id}/prices`,
-        requestTags('GET /products/{id}/prices', 'history', 'load'),
+        request('GET /products/{id}/prices [setup]', 'setup'),
     );
-    history_duration.add(response.timings.duration, { endpoint: 'history' });
+    setup_business_requests.add(1, { phase: 'setup' });
+    const history = parseJson(historyResponse);
+    const validHistory = matchesExpectedHistory(history);
+    validateResponse(historyResponse, 200, validHistory, 'setup', 'setup history');
+    requireSetup(validHistory && historyResponse.status === 200,
+        `setup history query failed: ${historyResponse.body}`);
 
-    const body = optionalJson(response);
-    const valid = evaluateResponse(response, 200, 'history')
-        && body !== null
-        && typeof body.name === 'string'
-        && Object.prototype.hasOwnProperty.call(body, 'description')
-        && Array.isArray(body.prices);
-    check(response, {
-        'history: status is 200': (result) => result.status === 200,
-        'history: content type is JSON': hasJsonContentType,
-        'history: body is valid JSON': () => body !== null,
-        'history: body contains name, description and prices': () => body !== null
-            && typeof body.name === 'string'
-            && Object.prototype.hasOwnProperty.call(body, 'description')
-            && Array.isArray(body.prices),
-        'history: no server error': (result) => result.status < 500,
-    }, { endpoint: 'history', phase: 'load' });
-    business_success.add(valid, { endpoint: 'history' });
+    console.log(`SETUP_PRODUCT_ID=${product.id}`);
+    console.log('SETUP_BUSINESS_REQUESTS=8');
 }
 
-export function createProduct(data) {
-    const iteration = exec.scenario.iterationInTest;
-    const name = `benchmark-product-${data.runId}-load-${iteration}`;
-    const description = `Created by k6 run ${data.runId}`;
+export function createProduct() {
+    const sequence = exec.scenario.iterationInTest + 1;
+    const payload = {
+        name: `Producto Test ${sequence}`,
+        description: `Descripción del producto ${sequence}`,
+    };
     const response = http.post(
         `${BASE_URL}/products`,
-        JSON.stringify({ name, description }),
-        jsonRequestTags('POST /products', 'create-product', 'load'),
-    );
-    write_duration.add(response.timings.duration, { endpoint: 'create-product' });
-
-    const body = optionalJson(response);
-    const valid = evaluateResponse(response, 201, 'create-product')
-        && body !== null
-        && Number.isInteger(body.id) && body.id > 0
-        && body.name === name
-        && body.description === description;
-    check(response, {
-        'create-product: status is 201': (result) => result.status === 201,
-        'create-product: content type is JSON': hasJsonContentType,
-        'create-product: body is valid JSON': () => body !== null,
-        'create-product: body contains expected fields': () => body !== null
-            && Number.isInteger(body.id) && body.id > 0
-            && body.name === name && body.description === description,
-        'create-product: no server error': (result) => result.status < 500,
-    }, { endpoint: 'create-product', phase: 'load' });
-    business_success.add(valid, { endpoint: 'create-product' });
-}
-
-export function addPrice(data) {
-    const iteration = exec.scenario.iterationInTest;
-    if (iteration >= data.addPriceProductIds.length) {
-        fail(`add-price exhausted its product pool at iteration ${iteration}`);
-    }
-    const productId = data.addPriceProductIds[iteration];
-    const payload = { value: 149.99, initDate: '2025-01-01', endDate: null };
-    const response = http.post(
-        `${BASE_URL}/products/${productId}/prices`,
         JSON.stringify(payload),
-        jsonRequestTags('POST /products/{id}/prices', 'add-price', 'load'),
+        jsonRequest('POST /products [product-creation]', 'product-creation'),
     );
-    write_duration.add(response.timings.duration, { endpoint: 'add-price' });
-
-    const body = optionalJson(response);
-    const valid = evaluateResponse(response, 201, 'add-price')
-        && body !== null
-        && body.value === payload.value
-        && body.initDate === payload.initDate
-        && Object.prototype.hasOwnProperty.call(body, 'endDate')
-        && body.endDate === null;
-    check(response, {
-        'add-price: status is 201': (result) => result.status === 201,
-        'add-price: content type is JSON': hasJsonContentType,
-        'add-price: body is valid JSON': () => body !== null,
-        'add-price: body contains expected fields': () => body !== null
-            && body.value === payload.value && body.initDate === payload.initDate
-            && Object.prototype.hasOwnProperty.call(body, 'endDate') && body.endDate === null,
-        'add-price: no server error': (result) => result.status < 500,
-    }, { endpoint: 'add-price', phase: 'load' });
-    business_success.add(valid, { endpoint: 'add-price' });
+    product_creation_requests.add(1, { phase: 'product-creation' });
+    product_creation_duration.add(response.timings.duration, { phase: 'product-creation' });
+    const body = parseJson(response);
+    const valid = body !== null
+        && Number.isInteger(body.id) && body.id > 0
+        && body.name === payload.name
+        && body.description === payload.description;
+    validateResponse(response, 201, valid, 'product-creation', 'product creation');
 }
 
-function scenario(execFunction, targetRate) {
-    const warmupRate = Math.max(1, Math.ceil(targetRate * 0.2));
+export function queryPrice() {
+    const productId = requiredProductId();
+    const response = http.get(
+        `${BASE_URL}/products/${productId}/prices?date=2024-04-15`,
+        request('GET /products/{id}/prices?date [price-query]', 'price-query'),
+    );
+    price_query_requests.add(1, { phase: 'price-query' });
+    price_query_duration.add(response.timings.duration, { phase: 'price-query' });
+    const body = parseJson(response);
+    const valid = body !== null && exactFields(body, ['value']) && body.value === 99.99;
+    validateResponse(response, 200, valid, 'price-query', 'price query');
+}
+
+export function queryHistory() {
+    const productId = requiredProductId();
+    const response = http.get(
+        `${BASE_URL}/products/${productId}/prices`,
+        request('GET /products/{id}/prices [history-query]', 'history-query'),
+    );
+    history_query_requests.add(1, { phase: 'history-query' });
+    history_query_duration.add(response.timings.duration, { phase: 'history-query' });
+    const body = parseJson(response);
+    validateResponse(response, 200, matchesExpectedHistory(body), 'history-query', 'history query');
+}
+
+function waitForHealthyApplication() {
+    for (let attempt = 1; attempt <= 60; attempt += 1) {
+        const response = http.get(
+            `${BASE_URL}/actuator/health`,
+            request('GET /actuator/health [setup]', 'setup'),
+        );
+        const body = parseJson(response);
+        if (response.status === 200 && hasJsonContentType(response) && body !== null && body.status === 'UP') {
+            setup_health_success.add(1, { phase: 'setup' });
+            check(response, {
+                'setup health: status is 200': (result) => result.status === 200,
+                'setup health: content type is JSON': hasJsonContentType,
+                'setup health: body is valid JSON': () => body !== null,
+                'setup health: status is UP': () => body.status === 'UP',
+            }, { phase: 'setup' });
+            return;
+        }
+        sleep(1);
+    }
+    fail('application did not become healthy within 60 seconds');
+}
+
+function validateResponse(response, expectedStatus, validContract, phase, label) {
+    if (response.status >= 500) {
+        server_errors.add(1, { phase });
+    }
+    if (response.status !== expectedStatus) {
+        unexpected_status_codes.add(1, { phase, status: String(response.status) });
+    }
+    if (!validContract) {
+        invalid_contracts.add(1, { phase });
+    }
+
+    const jsonBody = parseJson(response);
+    const success = response.status === expectedStatus
+        && response.status < 500
+        && hasJsonContentType(response)
+        && jsonBody !== null
+        && validContract;
+    business_success.add(success, { phase });
+
+    check(response, {
+        [`${label}: expected status`]: (result) => result.status === expectedStatus,
+        [`${label}: content type is JSON`]: hasJsonContentType,
+        [`${label}: body is valid JSON`]: () => jsonBody !== null,
+        [`${label}: response contract is valid`]: () => validContract,
+        [`${label}: no server error`]: (result) => result.status < 500,
+    }, { phase });
+}
+
+function matchesExpectedHistory(body) {
+    if (body === null
+        || !exactFields(body, ['name', 'description', 'prices'])
+        || body.name !== SETUP_PRODUCT_NAME
+        || body.description !== SETUP_PRODUCT_DESCRIPTION
+        || !Array.isArray(body.prices)
+        || body.prices.length !== SETUP_PRICES.length) {
+        return false;
+    }
+    return body.prices.every((price, index) => exactFields(price, ['value', 'initDate', 'endDate'])
+        && price.value === SETUP_PRICES[index].value
+        && price.initDate === SETUP_PRICES[index].initDate
+        && price.endDate === SETUP_PRICES[index].endDate);
+}
+
+function optionsForMode(mode) {
+    const common = {
+        discardResponseBodies: false,
+        summaryTrendStats: ['avg', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
+        thresholds: {
+            http_req_failed: ['rate<0.01'],
+            checks: ['rate>0.99'],
+            business_success: ['rate>0.99'],
+            server_errors: ['count==0'],
+            unexpected_status_codes: ['count==0'],
+            invalid_contracts: ['count==0'],
+            dropped_iterations: ['count==0'],
+        },
+    };
+
+    if (mode === 'setup') {
+        delete common.thresholds.http_req_failed;
+        common.scenarios = {
+            setup: sharedIterations('setupFlow', 1, 1, 'setup'),
+        };
+        common.thresholds.setup_business_requests = ['count==8'];
+        common.thresholds.setup_health_success = ['count==1'];
+        return common;
+    }
+    if (mode === 'product-creation') {
+        common.scenarios = {
+            product_creation: sharedIterations(
+                'createProduct', PRODUCT_CREATION_ITERATIONS,
+                integerFromEnvironment('PRODUCT_CREATION_VUS', 100), 'product-creation'),
+        };
+        common.thresholds.product_creation_requests = [`count==${PRODUCT_CREATION_ITERATIONS}`];
+        return common;
+    }
+    if (mode === 'price-query') {
+        common.scenarios = {
+            price_query: sharedIterations(
+                'queryPrice', PRICE_QUERY_ITERATIONS,
+                integerFromEnvironment('PRICE_QUERY_VUS', 500), 'price-query'),
+        };
+        common.thresholds.price_query_requests = [`count==${PRICE_QUERY_ITERATIONS}`];
+        return common;
+    }
+    if (mode === 'history-query') {
+        common.scenarios = {
+            history_query: sharedIterations(
+                'queryHistory', HISTORY_QUERY_ITERATIONS,
+                integerFromEnvironment('HISTORY_QUERY_VUS', 500), 'history-query'),
+        };
+        common.thresholds.history_query_requests = [`count==${HISTORY_QUERY_ITERATIONS}`];
+        return common;
+    }
+    throw new Error(`unsupported MODE '${mode}'`);
+}
+
+function sharedIterations(execFunction, iterations, vus, phase) {
+    if (vus > iterations) {
+        throw new Error(`${phase} VUs (${vus}) cannot exceed iterations (${iterations})`);
+    }
     return {
-        executor: 'ramping-arrival-rate',
+        executor: 'shared-iterations',
         exec: execFunction,
-        startRate: warmupRate,
-        timeUnit: '1s',
-        preAllocatedVUs: Math.max(2, Math.ceil(targetRate / 2)),
-        maxVUs: Math.max(4, targetRate * 2),
-        gracefulStop: '5s',
-        stages: [
-            { duration: WARMUP_DURATION, target: warmupRate },
-            { duration: RAMP_UP_DURATION, target: targetRate },
-            { duration: TEST_DURATION, target: targetRate },
-            { duration: COOLDOWN_DURATION, target: 0 },
-        ],
-        tags: { phase: 'load' },
+        vus,
+        iterations,
+        maxDuration: '30m',
+        gracefulStop: '0s',
+        tags: { phase },
     };
 }
 
-function createSetupProduct(runId, suffix) {
-    const name = `benchmark-product-${runId}-${suffix}`;
-    const description = `Prepared by k6 run ${runId}`;
-    const response = http.post(
-        `${BASE_URL}/products`,
-        JSON.stringify({ name, description }),
-        jsonRequestTags('POST /products [setup]', 'create-product', 'setup'),
-    );
-    const body = requiredJson(response, `create product ${suffix}`);
-    const valid = response.status === 201
-        && hasJsonContentType(response)
-        && Number.isInteger(body.id) && body.id > 0
-        && body.name === name && body.description === description;
-    check(response, {
-        'setup product: status is 201': (result) => result.status === 201,
-        'setup product: response contract is valid': () => valid,
-    }, { endpoint: 'create-product', phase: 'setup' });
-    requireSetup(valid, `product setup failed for ${suffix}: status=${response.status}, body=${response.body}`);
-    return body;
-}
-
-function createSetupPrice(productId, value, initDate, endDate) {
-    const payload = { value: Number(value), initDate, endDate };
-    const response = http.post(
-        `${BASE_URL}/products/${productId}/prices`,
-        JSON.stringify(payload),
-        jsonRequestTags('POST /products/{id}/prices [setup]', 'add-price', 'setup'),
-    );
-    const body = requiredJson(response, `add price to product ${productId}`);
-    const valid = response.status === 201
-        && hasJsonContentType(response)
-        && body.value === payload.value
-        && body.initDate === initDate
-        && Object.prototype.hasOwnProperty.call(body, 'endDate')
-        && body.endDate === endDate;
-    check(response, {
-        'setup price: status is 201': (result) => result.status === 201,
-        'setup price: response contract is valid': () => valid,
-    }, { endpoint: 'add-price', phase: 'setup' });
-    requireSetup(valid,
-        `price setup failed for product ${productId}: status=${response.status}, body=${response.body}`);
-}
-
-function evaluateResponse(response, expectedStatus, endpoint) {
-    if (response.status >= 500) {
-        server_errors.add(1, { endpoint });
+function integerFromEnvironment(name, defaultValue) {
+    const raw = __ENV[name];
+    const value = raw === undefined || raw === '' ? defaultValue : Number(raw);
+    if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`${name} must be a positive integer`);
     }
-    if (response.status !== expectedStatus) {
-        unexpected_status_codes.add(1, { endpoint, status: String(response.status) });
-    }
-    return response.status === expectedStatus && response.status < 500 && hasJsonContentType(response);
+    return value;
 }
 
-function optionalJson(response) {
+function requiredProductId() {
+    const value = Number(__ENV.SETUP_PRODUCT_ID);
+    if (!Number.isInteger(value) || value < 1) {
+        throw new Error('SETUP_PRODUCT_ID must be a positive integer');
+    }
+    return value;
+}
+
+function parseJson(response) {
     try {
         return response.json();
     }
     catch (error) {
         return null;
     }
-}
-
-function requiredJson(response, context) {
-    const body = optionalJson(response);
-    requireSetup(body !== null, `${context} is not valid JSON: ${response.body}`);
-    return body;
 }
 
 function requireSetup(condition, message) {
@@ -299,42 +315,24 @@ function requireSetup(condition, message) {
 
 function hasJsonContentType(response) {
     const contentType = response.headers['Content-Type'] || '';
-    return contentType.toLowerCase().includes('application/json');
+    const normalized = contentType.toLowerCase();
+    return normalized.includes('application/json') || normalized.includes('+json');
 }
 
 function exactFields(body, expectedFields) {
-    const actualFields = Object.keys(body).sort();
+    const actual = Object.keys(body).sort();
     const expected = [...expectedFields].sort();
-    return actualFields.length === expected.length
-        && actualFields.every((field, index) => field === expected[index]);
+    return actual.length === expected.length
+        && actual.every((field, index) => field === expected[index]);
 }
 
-function requestTags(name, endpoint, phase) {
-    return { tags: { name, endpoint, phase } };
+function request(name, phase) {
+    return { tags: { name, phase } };
 }
 
-function jsonRequestTags(name, endpoint, phase) {
+function jsonRequest(name, phase) {
     return {
         headers: { 'Content-Type': 'application/json' },
-        tags: { name, endpoint, phase },
+        tags: { name, phase },
     };
-}
-
-function numberFromEnvironment(name, defaultValue, minimum) {
-    const raw = __ENV[name];
-    const value = raw === undefined || raw === '' ? defaultValue : Number(raw);
-    if (!Number.isInteger(value) || value < minimum) {
-        throw new Error(`${name} must be an integer greater than or equal to ${minimum}`);
-    }
-    return value;
-}
-
-function durationToSeconds(duration) {
-    const match = /^(\d+(?:\.\d+)?)(ms|s|m|h)$/.exec(duration);
-    if (match === null) {
-        throw new Error(`Unsupported duration '${duration}'. Use ms, s, m or h.`);
-    }
-    const value = Number(match[1]);
-    const multipliers = { ms: 0.001, s: 1, m: 60, h: 3600 };
-    return value * multipliers[match[2]];
 }

@@ -307,49 +307,48 @@ Estos totales son una referencia y pueden crecer con la suite.
 
 ## Benchmark de rendimiento
 
-El benchmark mide `k6 -> Products API -> PostgreSQL`. Utiliza la imagen oficial fijada
-`grafana/k6:1.7.1`; no requiere instalar k6 localmente. El servicio pertenece al profile `benchmark`,
-espera a que la API esté saludable, prepara datos mediante HTTP con identificadores únicos y termina
-con un código distinto de cero si falla un threshold.
+El benchmark mide `k6 -> Products API -> PostgreSQL` y reproduce el escenario de `benchmark.sh`
+proporcionado con el challenge. Utiliza `grafana/k6:1.7.1`, no requiere instalar k6 localmente y
+permanece bajo el profile `benchmark`.
 
 ```bash
 docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
 ```
 
-El mismo comando funciona en una sola línea en PowerShell. Variables configurables:
+El orquestador prepara un único producto con los tres precios originales, valida las fechas
+`2024-04-15`, `2024-08-15`, `2025-03-01` y el historial, y después ejecuta secuencialmente:
+
+| Orden | Prueba | Peticiones exactas | VUs predeterminados |
+|---:|---|---:|---:|
+| 1 | Creación de productos | 1.000 | 100 |
+| 2 | Precio en `2024-04-15` | 20.000 | 500 |
+| 3 | Historial | 15.000 | 500 |
+
+Los VUs controlan concurrencia, no el total: cada fase usa `shared-iterations` y posee un threshold que
+exige exactamente su número de peticiones. No hay mezcla ponderada, arrival rate ni altas de precios
+durante la carga. Variables configurables:
 
 | Variable | Predeterminado |
 |---|---:|
 | `BASE_URL` | `http://app:8080` |
-| `WARMUP_DURATION` | `10s` |
-| `RAMP_UP_DURATION` | `15s` |
-| `TEST_DURATION` | `30s` |
-| `COOLDOWN_DURATION` | `10s` |
-| `TARGET_RATE` | `20` iteraciones/s |
+| `PRODUCT_CREATION_VUS` | `100` |
+| `PRICE_QUERY_VUS` | `500` |
+| `HISTORY_QUERY_VUS` | `500` |
 
 Ejemplo PowerShell:
 
 ```powershell
-$env:TARGET_RATE='30'; $env:TEST_DURATION='45s'; docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
+$env:PRICE_QUERY_VUS='250'; $env:HISTORY_QUERY_VUS='250'; docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
 ```
 
-Distribución estable de carga:
+k6 valida status, `Content-Type`, JSON y contrato esperado. Muestra duración, throughput, errores,
+checks, avg, mediana, p90, p95, p99 y máximo por fase. Los thresholds exigen cero estados inesperados,
+5xx, contratos inválidos e iteraciones descartadas; más de 99 % de checks y menos de 1 % de fallos HTTP.
 
-- 75 % consultas de precio vigente.
-- 15 % consultas de historial.
-- 5 % creación de producto.
-- 5 % alta de precio.
-
-k6 valida status, `Content-Type`, JSON y campos esperados; registra fallos, percentiles y métricas por
-endpoint. Los thresholds iniciales exigen menos de 1 % de errores HTTP, más de 99 % de checks, cero
-errores 5xx y p95 inferiores a 500 ms para precio vigente, 750 ms para historial y 1000 ms para
-escrituras.
-
-La línea base local obtuvo aproximadamente 16 requests/s globales, 0 % de errores, 100 % de checks,
-p95 de precio vigente alrededor de 4 ms y p95 de historial alrededor de 5–6 ms, sin saturación
-observada. Son resultados dependientes del hardware, Docker Desktop y la carga del equipo; no son un
-SLA ni una predicción de producción. El entorno, las dos ejecuciones, el consumo y las limitaciones se
-detallan en [docs/performance-results.md](docs/performance-results.md).
+Dos ejecuciones locales —la segunda conservando el volumen— completaron exactamente
+1.000/20.000/15.000 peticiones, 100 % de checks y 0 % de errores en unos 38 segundos. Con 500 VUs, la
+API utilizó aproximadamente su límite de una CPU. Los percentiles, consumo y limitaciones están en
+[docs/performance-results.md](docs/performance-results.md); no son un SLA ni una predicción universal.
 
 Cada ejecución añade datos únicos al volumen. Para repetir desde una base vacía, debe ejecutarse
 explícitamente `docker compose down -v`; el script k6 no elimina datos ni accede directamente a
@@ -374,8 +373,8 @@ PostgreSQL.
 - **Exclusión PostgreSQL:** mantiene la invariante de solapamiento bajo concurrencia, donde una
   comprobación Java aislada no sería suficiente.
 - **Tests con PostgreSQL real:** Testcontainers ejecuta la misma imagen y migración que la aplicación.
-- **k6:** ofrece carga progresiva, métricas por escenario, checks y exit codes reproducibles desde
-  Compose.
+- **k6:** conserva las cantidades del Bash original con concurrencia controlada, fases secuenciales,
+  métricas separadas y exit codes reproducibles desde Compose.
 - **Sin optimización preventiva:** la medición no mostró errores ni saturación, por lo que no se
   alteraron HikariCP, JVM, SQL o índices sin evidencia.
 
