@@ -10,6 +10,9 @@ import com.mango.products.adapter.in.web.security.SecurityErrorResponseWriter;
 import com.mango.products.application.port.in.ProductUseCases;
 import com.mango.products.application.port.in.command.CreateProductCommand;
 import com.mango.products.application.port.in.result.CurrentPriceResult;
+import com.mango.products.application.port.in.result.ConvertedPriceResult;
+import com.mango.products.application.exception.ExchangeRateUnavailableException;
+import com.mango.products.domain.model.CurrencyCode;
 import com.mango.products.application.port.in.result.ProductResult;
 
 import org.junit.jupiter.api.Test;
@@ -77,12 +80,65 @@ class ProductSecurityTest {
     @Test
     void readerScopeAllowsGet() throws Exception {
         when(productUseCases.getPriceAtDate(1L, LocalDate.of(2024, 4, 15)))
-                .thenReturn(new CurrentPriceResult(new BigDecimal("99.99")));
+                .thenReturn(new CurrentPriceResult(new BigDecimal("99.99"), CurrencyCode.EUR));
 
         mockMvc.perform(get("/products/1/prices").param("date", "2024-04-15")
                         .with(jwt().jwt(token -> token.subject("reader").claim("scope", "products.read"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.value").value(99.99));
+    }
+
+    @Test
+    void readerScopeAllowsHistoricalConversion() throws Exception {
+        LocalDate date = LocalDate.of(2024, 4, 15);
+        when(productUseCases.getPriceAtDate(1L, date, CurrencyCode.USD))
+                .thenReturn(new ConvertedPriceResult(
+                        new BigDecimal("106.74"), CurrencyCode.USD,
+                        new BigDecimal("99.99"), CurrencyCode.EUR,
+                        new BigDecimal("1.0675"), date));
+
+        mockMvc.perform(get("/products/1/prices")
+                        .param("date", "2024-04-15")
+                        .param("currency", "USD")
+                        .with(jwt().jwt(token -> token.subject("reader").claim("scope", "products.read"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.currency").value("USD"))
+                .andExpect(jsonPath("$.originalCurrency").value("EUR"));
+    }
+
+    @Test
+    void convertedPriceWithoutTokenIsUnauthorized() throws Exception {
+        mockMvc.perform(get("/products/1/prices")
+                        .param("date", "2024-04-15")
+                        .param("currency", "USD"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+        verifyNoInteractions(productUseCases);
+    }
+
+    @Test
+    void unsupportedCurrencyWithReaderReturnsValidationError() throws Exception {
+        mockMvc.perform(get("/products/1/prices")
+                        .param("date", "2024-04-15")
+                        .param("currency", "CAD")
+                        .with(jwt().jwt(token -> token.subject("reader").claim("scope", "products.read"))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+        verifyNoInteractions(productUseCases);
+    }
+
+    @Test
+    void unavailableExchangeProviderWithReaderReturns503() throws Exception {
+        LocalDate date = LocalDate.of(2024, 4, 15);
+        when(productUseCases.getPriceAtDate(1L, date, CurrencyCode.USD))
+                .thenThrow(new ExchangeRateUnavailableException());
+
+        mockMvc.perform(get("/products/1/prices")
+                        .param("date", "2024-04-15")
+                        .param("currency", "USD")
+                        .with(jwt().jwt(token -> token.subject("reader").claim("scope", "products.read"))))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("SERVICE_UNAVAILABLE"));
     }
 
     @Test

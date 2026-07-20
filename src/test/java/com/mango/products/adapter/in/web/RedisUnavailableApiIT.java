@@ -12,6 +12,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -42,26 +45,29 @@ class RedisUnavailableApiIT extends PostgreSQLIntegrationTestBase {
 
 	@Test
 	void productReadsRemainAvailableThroughPostgreSQLWhenRedisIsDown() throws Exception {
-		ResponseEntity<String> created = restTemplate.postForEntity(
-				"/products", new ProductRequest("Fail open", "Redis unavailable"), String.class);
+		ResponseEntity<String> created = exchange(
+				HttpMethod.POST, "/products",
+				new ProductRequest("Fail open", "Redis unavailable"), JwtTestTokens.writer());
 		assertEquals(HttpStatus.CREATED, created.getStatusCode());
 		long productId = objectMapper.readTree(created.getBody()).required("id").longValue();
 
-		ResponseEntity<String> priceCreated = restTemplate.postForEntity(
+		ResponseEntity<String> priceCreated = exchange(
+				HttpMethod.POST,
 				"/products/{id}/prices",
 				new PriceRequest(new BigDecimal("77.77"), LocalDate.of(2024, 1, 1), null),
-				String.class,
+				JwtTestTokens.writer(),
 				productId);
 		assertEquals(HttpStatus.CREATED, priceCreated.getStatusCode());
 
-		ResponseEntity<String> current = restTemplate.getForEntity(
-				"/products/{id}/prices?date=2030-01-01", String.class, productId);
+		ResponseEntity<String> current = exchange(
+				HttpMethod.GET, "/products/{id}/prices?date=2030-01-01",
+				null, JwtTestTokens.reader(), productId);
 		assertEquals(HttpStatus.OK, current.getStatusCode());
 		JsonNode currentBody = objectMapper.readTree(current.getBody());
 		assertEquals(new BigDecimal("77.77"), currentBody.required("value").decimalValue());
 
-		ResponseEntity<String> history = restTemplate.getForEntity(
-				"/products/{id}/prices", String.class, productId);
+		ResponseEntity<String> history = exchange(
+				HttpMethod.GET, "/products/{id}/prices", null, JwtTestTokens.reader(), productId);
 		assertEquals(HttpStatus.OK, history.getStatusCode());
 		assertEquals(1, objectMapper.readTree(history.getBody()).required("prices").size());
 	}
@@ -73,6 +79,13 @@ class RedisUnavailableApiIT extends PostgreSQLIntegrationTestBase {
 		catch (IOException exception) {
 			throw new IllegalStateException("Unable to allocate an unused Redis test port", exception);
 		}
+	}
+
+	private ResponseEntity<String> exchange(
+			HttpMethod method, String path, Object body, String token, Object... variables) {
+		HttpHeaders headers = new HttpHeaders();
+		headers.setBearerAuth(token);
+		return restTemplate.exchange(path, method, new HttpEntity<>(body, headers), String.class, variables);
 	}
 
 	private record ProductRequest(String name, String description) {

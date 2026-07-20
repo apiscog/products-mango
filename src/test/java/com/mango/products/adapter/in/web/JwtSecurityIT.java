@@ -78,14 +78,14 @@ class JwtSecurityIT extends PostgreSQLIntegrationTestBase {
         ResponseEntity<String> priceCreated = exchange(
                 HttpMethod.POST, "/products/" + productId + "/prices", priceJson, JwtTestTokens.writer());
         assertEquals(HttpStatus.CREATED, priceCreated.getStatusCode());
-        assertEquals(Set.of("value", "initDate", "endDate"), fields(json(priceCreated)));
+        assertEquals(Set.of("value", "currency", "initDate", "endDate"), fields(json(priceCreated)));
 
         String currentPath = "/products/" + productId + "/prices?date=2030-01-01";
         assertSecurityError(exchange(HttpMethod.GET, currentPath, null, null),
                 HttpStatus.UNAUTHORIZED, "UNAUTHORIZED");
         ResponseEntity<String> current = exchange(HttpMethod.GET, currentPath, null, JwtTestTokens.reader());
         assertEquals(HttpStatus.OK, current.getStatusCode());
-        assertEquals(Set.of("value"), fields(json(current)));
+        assertEquals(Set.of("value", "currency"), fields(json(current)));
         ResponseEntity<String> history = exchange(
                 HttpMethod.GET, "/products/" + productId + "/prices", null, JwtTestTokens.reader());
         assertEquals(HttpStatus.OK, history.getStatusCode());

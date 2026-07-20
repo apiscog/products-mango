@@ -11,6 +11,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,10 +31,11 @@ class RedisCacheApiIT extends RedisIntegrationTestBase {
 
 	@Test
 	void httpContractStaysStableAndCachedDataRefreshesAfterAddingPrice() throws Exception {
-		ResponseEntity<String> created = restTemplate.postForEntity(
+		ResponseEntity<String> created = exchange(
+				HttpMethod.POST,
 				"/products",
 				new ProductRequest("HTTP cached product", "Redis E2E"),
-				String.class);
+				JwtTestTokens.writer());
 		assertEquals(HttpStatus.CREATED, created.getStatusCode());
 		long productId = json(created).required("id").longValue();
 
@@ -42,6 +46,7 @@ class RedisCacheApiIT extends RedisIntegrationTestBase {
 		ResponseEntity<String> cachedPrice = getPrice(productId, "2024-04-15");
 		assertEquals(firstPrice.getBody(), cachedPrice.getBody());
 		assertEquals(new BigDecimal("99.99"), json(firstPrice).required("value").decimalValue());
+		assertEquals("EUR", json(firstPrice).required("currency").textValue());
 
 		ResponseEntity<String> firstHistory = getHistory(productId);
 		ResponseEntity<String> cachedHistory = getHistory(productId);
@@ -53,13 +58,14 @@ class RedisCacheApiIT extends RedisIntegrationTestBase {
 		assertTrue(redisTemplate.hasKey("products::price-history::" + productId + "::v1"));
 
 		assertEquals(HttpStatus.CREATED, addPrice(
-				productId, "149.99", "2024-07-01", null).getStatusCode());
+				productId, "149.99", "USD", "2024-07-01", null).getStatusCode());
 
 		ResponseEntity<String> refreshedHistory = getHistory(productId);
 		assertEquals(2, json(refreshedHistory).required("prices").size());
 		ResponseEntity<String> newCurrentPrice = getPrice(productId, "2030-01-01");
 		assertEquals(new BigDecimal("149.99"),
 				json(newCurrentPrice).required("value").decimalValue());
+		assertEquals("USD", json(newCurrentPrice).required("currency").textValue());
 		assertTrue(redisTemplate.hasKey("products::price-history::" + productId + "::v2"));
 		assertTrue(redisTemplate.hasKey(
 				"products::current-price::" + productId + "::v2::2030-01-01"));
@@ -70,21 +76,39 @@ class RedisCacheApiIT extends RedisIntegrationTestBase {
 			String value,
 			String initDate,
 			String endDate) {
-		return restTemplate.postForEntity(
+		return addPrice(productId, value, null, initDate, endDate);
+	}
+
+	private ResponseEntity<String> addPrice(
+			long productId,
+			String value,
+			String currency,
+			String initDate,
+			String endDate) {
+		return exchange(
+				HttpMethod.POST,
 				"/products/{id}/prices",
-				new PriceRequest(new BigDecimal(value), LocalDate.parse(initDate),
+				new PriceRequest(new BigDecimal(value), currency, LocalDate.parse(initDate),
 						endDate == null ? null : LocalDate.parse(endDate)),
-				String.class,
+				JwtTestTokens.writer(),
 				productId);
 	}
 
 	private ResponseEntity<String> getPrice(long productId, String date) {
-		return restTemplate.getForEntity(
-				"/products/{id}/prices?date={date}", String.class, productId, date);
+		return exchange(HttpMethod.GET, "/products/{id}/prices?date={date}",
+				null, JwtTestTokens.reader(), productId, date);
 	}
 
 	private ResponseEntity<String> getHistory(long productId) {
-		return restTemplate.getForEntity("/products/{id}/prices", String.class, productId);
+		return exchange(HttpMethod.GET, "/products/{id}/prices",
+				null, JwtTestTokens.reader(), productId);
+	}
+
+	private ResponseEntity<String> exchange(
+			HttpMethod method, String path, Object body, String token, Object... variables) {
+		HttpHeaders headers = new HttpHeaders();
+		headers.setBearerAuth(token);
+		return restTemplate.exchange(path, method, new HttpEntity<>(body, headers), String.class, variables);
 	}
 
 	private JsonNode json(ResponseEntity<String> response) throws Exception {
@@ -94,7 +118,7 @@ class RedisCacheApiIT extends RedisIntegrationTestBase {
 	private record ProductRequest(String name, String description) {
 	}
 
-	private record PriceRequest(BigDecimal value, LocalDate initDate, LocalDate endDate) {
+	private record PriceRequest(BigDecimal value, String currency, LocalDate initDate, LocalDate endDate) {
 	}
 
 }
