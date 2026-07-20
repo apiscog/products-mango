@@ -12,31 +12,34 @@ public final class Price {
 	private final Long id;
 	private final Long productId;
 	private final BigDecimal value;
+	private final CurrencyCode currency;
 	private final LocalDate initDate;
 	private final LocalDate endDate;
 
-	private Price(Long id, Long productId, BigDecimal value, LocalDate initDate, LocalDate endDate) {
+	private Price(Long id, Long productId, BigDecimal value, CurrencyCode currency, LocalDate initDate, LocalDate endDate) {
 		this.id = id;
 		this.productId = validateProductId(productId);
 		this.value = validateValue(value);
+		this.currency = validateCurrency(currency);
 		this.initDate = validateInitDate(initDate);
 		this.endDate = validateEndDate(initDate, endDate);
 	}
 
-	public static Price create(Long productId, BigDecimal value, LocalDate initDate, LocalDate endDate) {
-		return new Price(null, productId, value, initDate, endDate);
+	public static Price create(Long productId, BigDecimal value, CurrencyCode currency, LocalDate initDate, LocalDate endDate) {
+		return new Price(null, productId, value, currency, initDate, endDate);
 	}
 
 	public static Price reconstitute(
 			Long id,
 			Long productId,
 			BigDecimal value,
+			CurrencyCode currency,
 			LocalDate initDate,
 			LocalDate endDate) {
 		if (id == null) {
 			throw new DomainValidationException("Price id is required when reconstituting a persisted price");
 		}
-		return new Price(id, productId, value, initDate, endDate);
+		return new Price(id, productId, value, currency, initDate, endDate);
 	}
 
 	public boolean overlaps(Price other) {
@@ -58,6 +61,10 @@ public final class Price {
 
 	public BigDecimal getValue() {
 		return value;
+	}
+
+	public CurrencyCode getCurrency() {
+		return currency;
 	}
 
 	public LocalDate getInitDate() {
@@ -86,6 +93,13 @@ public final class Price {
 			throw new DomainValidationException("Price value must not have more than 2 decimal places");
 		}
 		return value;
+	}
+
+	private static CurrencyCode validateCurrency(CurrencyCode currency) {
+		if (currency == null) {
+			throw new DomainValidationException("Price currency is required");
+		}
+		return currency;
 	}
 
 	private static LocalDate validateInitDate(LocalDate initDate) {

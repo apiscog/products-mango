@@ -35,6 +35,10 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/products
       SPRING_DATASOURCE_USERNAME: products
       SPRING_DATASOURCE_PASSWORD: products
+      EXCHANGE_API_PRIMARY_URL: ${EXCHANGE_API_PRIMARY_URL:-https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@{date}/v1/currencies/{base}.json}
+      EXCHANGE_API_FALLBACK_URL: ${EXCHANGE_API_FALLBACK_URL:-https://{date}.currency-api.pages.dev/v1/currencies/{base}.json}
+      EXCHANGE_API_CONNECT_TIMEOUT: ${EXCHANGE_API_CONNECT_TIMEOUT:-2s}
+      EXCHANGE_API_READ_TIMEOUT: ${EXCHANGE_API_READ_TIMEOUT:-3s}
     depends_on:
       postgres:
         condition: service_healthy

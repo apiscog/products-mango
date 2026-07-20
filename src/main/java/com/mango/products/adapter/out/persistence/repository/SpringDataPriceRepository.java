@@ -1,6 +1,5 @@
 package com.mango.products.adapter.out.persistence.repository;
 
-import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
@@ -14,12 +13,12 @@ import com.mango.products.adapter.out.persistence.entity.PriceJpaEntity;
 public interface SpringDataPriceRepository extends JpaRepository<PriceJpaEntity, Long> {
 
 	@Query(value = """
-			SELECT p.value
+			SELECT p.id, p.product_id, p.value, p.currency, p.init_date, p.end_date
 			FROM prices p
 			WHERE p.product_id = :productId
 			  AND p.validity @> CAST(:date AS DATE)
 			""", nativeQuery = true)
-	Optional<BigDecimal> findValueAtDate(@Param("productId") long productId, @Param("date") LocalDate date);
+	Optional<PriceJpaEntity> findAtDate(@Param("productId") long productId, @Param("date") LocalDate date);
 
 	@Query(value = """
 			SELECT EXISTS (

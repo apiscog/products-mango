@@ -5,9 +5,11 @@ import java.time.LocalDate;
 
 import com.mango.products.domain.model.CurrencyCode;
 
-public record PriceHistoryItemResponse(
+public record ConvertedPriceResponse(
 		BigDecimal value,
 		CurrencyCode currency,
-		LocalDate initDate,
-		LocalDate endDate) {
+		BigDecimal originalValue,
+		CurrencyCode originalCurrency,
+		BigDecimal exchangeRate,
+		LocalDate exchangeRateDate) {
 }

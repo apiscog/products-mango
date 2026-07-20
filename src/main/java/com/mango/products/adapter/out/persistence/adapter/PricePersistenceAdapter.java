@@ -1,6 +1,5 @@
 package com.mango.products.adapter.out.persistence.adapter;
 
-import java.math.BigDecimal;
 import java.sql.SQLException;
 import java.time.LocalDate;
 import java.util.Collections;
@@ -53,8 +52,8 @@ public class PricePersistenceAdapter implements PriceRepository {
 	}
 
 	@Override
-	public Optional<BigDecimal> findValueAtDate(long productId, LocalDate date) {
-		return repository.findValueAtDate(productId, date);
+	public Optional<Price> findAtDate(long productId, LocalDate date) {
+		return repository.findAtDate(productId, date).map(PricePersistenceMapper::toDomain);
 	}
 
 	@Override
