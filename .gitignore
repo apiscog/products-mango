@@ -31,3 +31,11 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Local JWT artifacts ###
+*.jwt
+*.token
+.jwt-tokens/
+tools/jwt/*.local.pem
+/tools/jwt/generated/
+/config/jwt/generated/

@@ -1,6 +1,10 @@
 package com.mango.products.adapter.in.web;
 
 import com.mango.products.adapter.in.web.error.GlobalExceptionHandler;
+import com.mango.products.adapter.in.web.security.JsonAccessDeniedHandler;
+import com.mango.products.adapter.in.web.security.JsonAuthenticationEntryPoint;
+import com.mango.products.adapter.in.web.security.SecurityConfiguration;
+import com.mango.products.adapter.in.web.security.SecurityErrorResponseWriter;
 import com.mango.products.application.exception.PriceNotFoundException;
 import com.mango.products.application.exception.PriceOverlapException;
 import com.mango.products.application.exception.ProductNotFoundException;
@@ -22,6 +26,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.security.test.context.support.WithMockUser;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -43,8 +48,19 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@WebMvcTest(ProductController.class)
-@Import(GlobalExceptionHandler.class)
+@WebMvcTest(value = ProductController.class, properties = {
+        "products.security.jwt.public-key-location=classpath:security/test-public-key.pem",
+        "products.security.jwt.issuer=products-challenge-dev",
+        "products.security.jwt.audience=products-api"
+})
+@Import({
+        GlobalExceptionHandler.class,
+        SecurityConfiguration.class,
+        SecurityErrorResponseWriter.class,
+        JsonAuthenticationEntryPoint.class,
+        JsonAccessDeniedHandler.class
+})
+@WithMockUser(authorities = {"SCOPE_products.read", "SCOPE_products.write"})
 class ProductControllerTest {
 
     private static final LocalDate INIT_DATE = LocalDate.of(2024, 1, 1);

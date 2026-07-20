@@ -6,6 +6,11 @@ SCRIPT=/scripts/products-load-test.js
 SETUP_LOG=/tmp/setup.log
 TOTAL_START="$(date +%s)"
 
+if [ -z "${ACCESS_TOKEN:-}" ]; then
+  echo "ACCESS_TOKEN is required; generate a fresh writer token before running the benchmark" >&2
+  exit 1
+fi
+
 trap 'rm -f "$SETUP_LOG"' EXIT
 
 run_phase() {
