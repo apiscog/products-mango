@@ -35,11 +35,16 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/products
       SPRING_DATASOURCE_USERNAME: products
       SPRING_DATASOURCE_PASSWORD: products
+      JWT_PUBLIC_KEY_LOCATION: file:/run/config/products-public-key.pem
+      JWT_ISSUER: ${JWT_ISSUER:-products-challenge-dev}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-products-api}
+    volumes:
+      - ./config/jwt/generated/dev-public-key.pem:/run/config/products-public-key.pem:ro
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1"]
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --output-document=- http://localhost:8080/actuator/health > /dev/null || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 12
@@ -65,6 +70,7 @@ services:
       PRODUCT_CREATION_VUS: ${PRODUCT_CREATION_VUS:-100}
       PRICE_QUERY_VUS: ${PRICE_QUERY_VUS:-500}
       HISTORY_QUERY_VUS: ${HISTORY_QUERY_VUS:-500}
+      ACCESS_TOKEN: ${ACCESS_TOKEN:-}
     volumes:
       - ./performance/products-load-test.js:/scripts/products-load-test.js:ro
       - ./performance/run-benchmark.sh:/scripts/run-benchmark.sh:ro
