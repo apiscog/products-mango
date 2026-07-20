@@ -38,6 +38,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class ProductsApiIT extends PostgreSQLIntegrationTestBase {
 
+    private static final String WRITER_TOKEN = JwtTestTokens.writer();
+
     private static final Set<String> PRODUCT_FIELDS = Set.of("id", "name", "description");
     private static final Set<String> PRICE_FIELDS = Set.of("value", "initDate", "endDate");
     private static final Set<String> CURRENT_PRICE_FIELDS = Set.of("value");
@@ -321,11 +323,14 @@ class ProductsApiIT extends PostgreSQLIntegrationTestBase {
     private ResponseEntity<String> post(String path, String body) {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(WRITER_TOKEN);
         return restTemplate.exchange(url(path), HttpMethod.POST, new HttpEntity<>(body, headers), String.class);
     }
 
     private ResponseEntity<String> get(String path) {
-        return restTemplate.getForEntity(url(path), String.class);
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(WRITER_TOKEN);
+        return restTemplate.exchange(url(path), HttpMethod.GET, new HttpEntity<>(headers), String.class);
     }
 
     private String url(String path) {

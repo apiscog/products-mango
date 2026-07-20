@@ -26,6 +26,10 @@ public abstract class PostgreSQLIntegrationTestBase {
 		registry.add("spring.datasource.url", POSTGRESQL::getJdbcUrl);
 		registry.add("spring.datasource.username", POSTGRESQL::getUsername);
 		registry.add("spring.datasource.password", POSTGRESQL::getPassword);
+		registry.add("products.security.jwt.public-key-location",
+				() -> "classpath:security/test-public-key.pem");
+		registry.add("products.security.jwt.issuer", () -> "products-challenge-dev");
+		registry.add("products.security.jwt.audience", () -> "products-api");
 	}
 
 	@BeforeEach
