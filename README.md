@@ -38,18 +38,22 @@ Por ejemplo, `[2024-01-01, 2024-06-30]` se solapa con
 - Docker y Docker Compose.
 - Grafana k6 1.7.1.
 
+> `master` contiene la entrega base. Las ramas `feature/exchange-currency`,
+> `feature/redis-cache` y `feature/jwt-security` conservan bonus independientes.
+> `feature/bonus-track` integra deliberadamente los tres.
+
 ## Arquitectura
 
 Se aplica una arquitectura hexagonal ligera dentro de una única aplicación modular:
 
 ```mermaid
 flowchart LR
-    Client[Cliente] --> Web[REST Controller]
+    Client[Cliente] --> Security[JWT Security]
+    Security --> Web[REST Controller]
     Web --> Port[ProductUseCases]
-    Port --> Service[ProductApplicationService]
-    Service --> Repositories[Repository ports]
-    Repositories --> Adapters[PostgreSQL adapters]
-    Adapters --> Database[(PostgreSQL)]
+    Port --> Cache[(Redis)]
+    Port --> Database[(PostgreSQL)]
+    Port --> Exchange[ExchangeRateProvider]
 ```
 
 - `domain` contiene Java puro y no depende de Spring, JPA ni HTTP.
@@ -80,8 +84,8 @@ La base de datos es la autoridad definitiva de esta invariante.
 
 ## Requisitos previos
 
-Para el flujo recomendado solo se necesita Docker con Docker Compose v2 y los puertos locales `8080`
-y `5432` disponibles. Java y PostgreSQL locales no son necesarios cuando se utiliza Docker Compose.
+Para el flujo recomendado se necesita Docker con Docker Compose v2, Java 21 para generar las claves
+locales y los puertos `8080`, `5432` y `6379` disponibles. PostgreSQL y Redis locales no son necesarios.
 
 ## Inicio rápido con Docker Compose
 
@@ -89,12 +93,13 @@ y `5432` disponibles. Java y PostgreSQL locales no son necesarios cuando se util
 git clone https://github.com/apiscog/products-mango.git
 cd products-mango
 java tools/jwt/GenerateDevKeys.java
-docker compose up -d --build postgres app
+docker compose up -d --build postgres redis app
 docker compose ps
 ```
 
-Compose levanta PostgreSQL 17, espera a que esté saludable y después inicia la API. Flyway crea el
-esquema automáticamente. La aplicación se empaqueta con Maven en una imagen propia multi-stage.
+Compose levanta PostgreSQL 17 y Redis 7.4.9, espera a que ambos estén saludables y después inicia la
+API. Flyway crea el esquema automáticamente. La aplicación se empaqueta con Maven en una imagen
+propia multi-stage.
 
 | Servicio | Dirección |
 |---|---|
@@ -103,6 +108,7 @@ esquema automáticamente. La aplicación se empaqueta con Maven en una imagen pr
 | Swagger UI | <http://localhost:8080/swagger-ui/index.html> |
 | OpenAPI JSON | <http://localhost:8080/v3/api-docs> |
 | PostgreSQL | `localhost:5432` |
+| Redis | `localhost:6379` |
 
 PostgreSQL utiliza un volumen persistente. Para detener los servicios conservando los datos:
 
@@ -116,10 +122,10 @@ Para eliminar también los datos locales:
 docker compose down -v
 ```
 
-## Bonus de seguridad JWT (esta rama)
+## Bonus de seguridad JWT integrado
 
-La rama **feature/jwt-security** anade Spring Security OAuth2 Resource Server. **master** conserva la
-entrega base sin autenticacion. Products API valida Bearer tokens RS256 y scopes antes de llegar al
+La integración incorpora Spring Security OAuth2 Resource Server. **master** conserva la entrega base
+sin autenticación. Products API valida Bearer tokens RS256 y scopes antes de llegar al
 controlador; no emite tokens, no gestiona usuarios o contrasenas y no es un Authorization Server.
 
 ~~~text
@@ -151,7 +157,7 @@ Desde la raiz, antes de arrancar la aplicacion:
 
 ~~~bash
 java tools/jwt/GenerateDevKeys.java
-docker compose up -d --build postgres app
+docker compose up -d --build postgres redis app
 ~~~
 
 La utilidad intenta aplicar permisos de lectura/escritura solo para el propietario a la privada en
@@ -425,9 +431,9 @@ y peticiones HTTP end-to-end en un puerto aleatorio. No se utiliza H2 ni Docker 
 
 Totales actuales de esta rama:
 
-- 92 tests rápidos, incluidos seguridad WebMvc y generación local de claves.
-- 51 ejecuciones de integración, incluidas 13 de JWT real.
-- 143 ejecuciones en total.
+- 124 tests rápidos, incluidos seguridad WebMvc, caché, exchange y generación local de claves.
+- 63 ejecuciones de integración con PostgreSQL, Redis, JWT real y Flyway.
+- 187 ejecuciones en total.
 
 Estos totales son una referencia y pueden crecer con la suite.
 
@@ -541,8 +547,8 @@ docs                               # Resultados y análisis de rendimiento
 
 ## Bonus: Multiple currencies and historical conversion
 
-Esta rama opcional, `feature/exchange-currency`, parte directamente de `master`. La rama `master`
-mantiene la entrega base sin esta funcionalidad.
+Esta funcionalidad procede de `feature/exchange-currency` y se integra aquí con Redis y JWT.
+`master` mantiene la entrega base sin esta funcionalidad.
 
 Cada precio conserva una moneda original de un conjunto cerrado: `EUR`, `USD`, `GBP`, `JPY` y
 `CHF`. Si `currency` se omite o se envía como `null` al crear un precio, el adaptador REST aplica
@@ -614,6 +620,9 @@ ejecuta conversiones ni depende del proveedor externo.
 Más detalles de diseño y validación:
 [docs/exchange-currency-results.md](docs/exchange-currency-results.md).
 
+Las decisiones y validaciones del conjunto están en
+[docs/bonus-track-results.md](docs/bonus-track-results.md).
+
 Limitaciones específicas: el proveedor gratuito no ofrece SLA; no hay caché de tasas, criptomonedas,
 conversión del historial ni reglas de decimales por divisa. PostgreSQL sigue siendo la fuente del
 precio original; el proveedor externo solo aporta tasas.
@@ -640,7 +649,8 @@ Estas opciones no eran necesarias para el challenge y no se presentan como funci
 
 | Objetivo | Comando |
 |---|---|
-| Levantar API y PostgreSQL | `docker compose up -d --build postgres app` |
+| Generar claves JWT locales | `java tools/jwt/GenerateDevKeys.java` |
+| Levantar API, PostgreSQL y Redis | `docker compose up -d --build postgres redis app` |
 | Ver estado | `docker compose ps` |
 | Ver logs de la API | `docker compose logs app` |
 | Detener conservando datos | `docker compose down` |
