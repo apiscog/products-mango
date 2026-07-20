@@ -19,6 +19,7 @@ import com.mango.products.adapter.out.persistence.adapter.PricePersistenceAdapte
 import com.mango.products.adapter.out.persistence.adapter.ProductPersistenceAdapter;
 import com.mango.products.application.exception.PriceOverlapException;
 import com.mango.products.domain.model.Price;
+import com.mango.products.domain.model.CurrencyCode;
 import com.mango.products.domain.model.Product;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -48,11 +49,12 @@ class PricePersistenceAdapterIT extends PostgreSQLIntegrationTestBase {
 		long productId = createProduct("Product").getId();
 		BigDecimal exactValue = new BigDecimal("12345678901234567.89");
 
-		Price saved = priceAdapter.save(Price.create(productId, exactValue, JANUARY_FIRST, JUNE_THIRTIETH));
+		Price saved = priceAdapter.save(Price.create(productId, exactValue, CurrencyCode.EUR, JANUARY_FIRST, JUNE_THIRTIETH));
 		Price found = priceAdapter.findHistoryByProductId(productId).getFirst();
 
 		assertEquals(saved.getId(), found.getId());
 		assertEquals(0, exactValue.compareTo(found.getValue()));
+		assertEquals(CurrencyCode.EUR, found.getCurrency());
 		assertEquals(JANUARY_FIRST, found.getInitDate());
 		assertEquals(JUNE_THIRTIETH, found.getEndDate());
 	}
@@ -61,7 +63,7 @@ class PricePersistenceAdapterIT extends PostgreSQLIntegrationTestBase {
 	void savesOpenEndedPrice() {
 		long productId = createProduct("Product").getId();
 
-		priceAdapter.save(Price.create(productId, money("10.00"), JANUARY_FIRST, null));
+		priceAdapter.save(Price.create(productId, money("10.00"), CurrencyCode.EUR, JANUARY_FIRST, null));
 
 		assertNull(priceAdapter.findHistoryByProductId(productId).getFirst().getEndDate());
 	}
@@ -71,7 +73,7 @@ class PricePersistenceAdapterIT extends PostgreSQLIntegrationTestBase {
 		long productId = createProductWithFinitePrice();
 
 		assertEquals(0, money("10.00").compareTo(
-				priceAdapter.findValueAtDate(productId, JANUARY_FIRST).orElseThrow()));
+				priceAdapter.findAtDate(productId, JANUARY_FIRST).orElseThrow().getValue()));
 	}
 
 	@Test
@@ -79,22 +81,53 @@ class PricePersistenceAdapterIT extends PostgreSQLIntegrationTestBase {
 		long productId = createProductWithFinitePrice();
 
 		assertEquals(0, money("10.00").compareTo(
-				priceAdapter.findValueAtDate(productId, JUNE_THIRTIETH).orElseThrow()));
+				priceAdapter.findAtDate(productId, JUNE_THIRTIETH).orElseThrow().getValue()));
 	}
 
 	@Test
 	void doesNotFindValueAfterIntervalEnd() {
 		long productId = createProductWithFinitePrice();
 
-		assertTrue(priceAdapter.findValueAtDate(productId, JULY_FIRST).isEmpty());
+		assertTrue(priceAdapter.findAtDate(productId, JULY_FIRST).isEmpty());
 	}
 
 	@Test
 	void openEndedPriceRemainsValidInFuture() {
 		long productId = createProduct("Product").getId();
-		priceAdapter.save(Price.create(productId, money("10.00"), JANUARY_FIRST, null));
+		priceAdapter.save(Price.create(productId, money("10.00"), CurrencyCode.EUR, JANUARY_FIRST, null));
 
-		assertTrue(priceAdapter.findValueAtDate(productId, LocalDate.of(2100, 1, 1)).isPresent());
+		assertTrue(priceAdapter.findAtDate(productId, LocalDate.of(2100, 1, 1)).isPresent());
+	}
+
+	@Test
+	void persistsAndReconstructsSupportedCurrencies() {
+		long productId = createProduct("Currencies").getId();
+		Price usd = priceAdapter.save(Price.create(
+				productId, money("10.00"), CurrencyCode.USD, JANUARY_FIRST, JUNE_THIRTIETH));
+		Price gbp = priceAdapter.save(Price.create(
+				productId, money("20.00"), CurrencyCode.GBP, JULY_FIRST, DECEMBER_THIRTY_FIRST));
+
+		assertEquals(CurrencyCode.USD, priceAdapter.findAtDate(productId, JANUARY_FIRST)
+				.orElseThrow().getCurrency());
+		assertEquals(List.of(CurrencyCode.USD, CurrencyCode.GBP),
+				priceAdapter.findHistoryByProductId(productId).stream()
+						.map(Price::getCurrency).toList());
+		assertTrue(usd.getId() > 0);
+		assertTrue(gbp.getId() > 0);
+	}
+
+	@Test
+	void databaseRejectsNullAndUnsupportedCurrency() {
+		long productId = createProduct("Constraints").getId();
+		String insert = """
+				INSERT INTO prices(product_id, value, currency, init_date, end_date)
+				VALUES (?, 10.00, ?, DATE '2024-01-01', DATE '2024-06-30')
+				""";
+
+		assertThrows(DataIntegrityViolationException.class,
+				() -> jdbcTemplate.update(insert, productId, "CAD"));
+		assertThrows(DataIntegrityViolationException.class,
+				() -> jdbcTemplate.update(insert, productId, null));
 	}
 
 	@Test
@@ -131,9 +164,9 @@ class PricePersistenceAdapterIT extends PostgreSQLIntegrationTestBase {
 	void returnsHistoryOrderedByInitDateThenId() {
 		long productId = createProduct("Product").getId();
 		Price later = priceAdapter.save(Price.create(
-				productId, money("20.00"), JULY_FIRST, DECEMBER_THIRTY_FIRST));
+				productId, money("20.00"), CurrencyCode.USD, JULY_FIRST, DECEMBER_THIRTY_FIRST));
 		Price earlier = priceAdapter.save(Price.create(
-				productId, money("10.00"), JANUARY_FIRST, JUNE_THIRTIETH));
+				productId, money("10.00"), CurrencyCode.EUR, JANUARY_FIRST, JUNE_THIRTIETH));
 
 		List<Price> history = priceAdapter.findHistoryByProductId(productId);
 
@@ -153,7 +186,7 @@ class PricePersistenceAdapterIT extends PostgreSQLIntegrationTestBase {
 		long productId = createProductWithFinitePrice();
 
 		assertThrows(PriceOverlapException.class, () -> priceAdapter.save(Price.create(
-				productId, money("20.00"), JUNE_THIRTIETH, DECEMBER_THIRTY_FIRST)));
+				productId, money("20.00"), CurrencyCode.USD, JUNE_THIRTIETH, DECEMBER_THIRTY_FIRST)));
 		assertEquals(1, countPrices(productId));
 	}
 
@@ -161,7 +194,7 @@ class PricePersistenceAdapterIT extends PostgreSQLIntegrationTestBase {
 	void nonOverlappingIntervalsForSameProductCanBePersisted() {
 		long productId = createProductWithFinitePrice();
 
-		priceAdapter.save(Price.create(productId, money("20.00"), JULY_FIRST, DECEMBER_THIRTY_FIRST));
+		priceAdapter.save(Price.create(productId, money("20.00"), CurrencyCode.EUR, JULY_FIRST, DECEMBER_THIRTY_FIRST));
 
 		assertEquals(2, countPrices(productId));
 	}
@@ -171,8 +204,8 @@ class PricePersistenceAdapterIT extends PostgreSQLIntegrationTestBase {
 		long firstProductId = createProduct("First").getId();
 		long secondProductId = createProduct("Second").getId();
 
-		priceAdapter.save(Price.create(firstProductId, money("10.00"), JANUARY_FIRST, JUNE_THIRTIETH));
-		priceAdapter.save(Price.create(secondProductId, money("10.00"), JANUARY_FIRST, JUNE_THIRTIETH));
+		priceAdapter.save(Price.create(firstProductId, money("10.00"), CurrencyCode.EUR, JANUARY_FIRST, JUNE_THIRTIETH));
+		priceAdapter.save(Price.create(secondProductId, money("10.00"), CurrencyCode.EUR, JANUARY_FIRST, JUNE_THIRTIETH));
 
 		assertEquals(1, countPrices(firstProductId));
 		assertEquals(1, countPrices(secondProductId));
@@ -180,7 +213,7 @@ class PricePersistenceAdapterIT extends PostgreSQLIntegrationTestBase {
 
 	@Test
 	void nonOverlapIntegrityViolationsAreNotMislabeled() {
-		Price orphanPrice = Price.create(Long.MAX_VALUE, money("10.00"), JANUARY_FIRST, JUNE_THIRTIETH);
+		Price orphanPrice = Price.create(Long.MAX_VALUE, money("10.00"), CurrencyCode.EUR, JANUARY_FIRST, JUNE_THIRTIETH);
 
 		assertThrows(DataIntegrityViolationException.class, () -> priceAdapter.save(orphanPrice));
 	}
@@ -188,8 +221,8 @@ class PricePersistenceAdapterIT extends PostgreSQLIntegrationTestBase {
 	@Test
 	void concurrentOverlappingInsertsYieldOneSuccessAndOneOverlap() throws Exception {
 		long productId = createProduct("Product").getId();
-		Price first = Price.create(productId, money("10.00"), JANUARY_FIRST, JUNE_THIRTIETH);
-		Price second = Price.create(productId, money("20.00"), JUNE_THIRTIETH, DECEMBER_THIRTY_FIRST);
+		Price first = Price.create(productId, money("10.00"), CurrencyCode.EUR, JANUARY_FIRST, JUNE_THIRTIETH);
+		Price second = Price.create(productId, money("20.00"), CurrencyCode.EUR, JUNE_THIRTIETH, DECEMBER_THIRTY_FIRST);
 
 		List<InsertOutcome> outcomes = insertConcurrently(first, second);
 
@@ -201,8 +234,8 @@ class PricePersistenceAdapterIT extends PostgreSQLIntegrationTestBase {
 	@Test
 	void concurrentNonOverlappingInsertsBothSucceed() throws Exception {
 		long productId = createProduct("Product").getId();
-		Price first = Price.create(productId, money("10.00"), JANUARY_FIRST, JUNE_THIRTIETH);
-		Price second = Price.create(productId, money("20.00"), JULY_FIRST, DECEMBER_THIRTY_FIRST);
+		Price first = Price.create(productId, money("10.00"), CurrencyCode.EUR, JANUARY_FIRST, JUNE_THIRTIETH);
+		Price second = Price.create(productId, money("20.00"), CurrencyCode.EUR, JULY_FIRST, DECEMBER_THIRTY_FIRST);
 
 		List<InsertOutcome> outcomes = insertConcurrently(first, second);
 
@@ -239,7 +272,7 @@ class PricePersistenceAdapterIT extends PostgreSQLIntegrationTestBase {
 
 	private long createProductWithFinitePrice() {
 		long productId = createProduct("Product").getId();
-		priceAdapter.save(Price.create(productId, money("10.00"), JANUARY_FIRST, JUNE_THIRTIETH));
+		priceAdapter.save(Price.create(productId, money("10.00"), CurrencyCode.EUR, JANUARY_FIRST, JUNE_THIRTIETH));
 		return productId;
 	}
 

@@ -13,6 +13,7 @@ import com.mango.products.application.port.in.ProductUseCases;
 import com.mango.products.application.port.in.command.AddPriceCommand;
 import com.mango.products.application.port.in.command.CreateProductCommand;
 import com.mango.products.application.port.in.result.CurrentPriceResult;
+import com.mango.products.application.port.in.result.ConvertedPriceResult;
 import com.mango.products.application.port.in.result.PriceResult;
 import com.mango.products.application.port.in.result.ProductHistoryResult;
 import com.mango.products.application.port.in.result.ProductResult;
@@ -27,10 +28,15 @@ public class ProductApplicationService implements ProductUseCases {
 
 	private final ProductRepository productRepository;
 	private final PriceRepository priceRepository;
+	private final CurrencyConversionService currencyConversionService;
 
-	public ProductApplicationService(ProductRepository productRepository, PriceRepository priceRepository) {
+	public ProductApplicationService(
+			ProductRepository productRepository,
+			PriceRepository priceRepository,
+			CurrencyConversionService currencyConversionService) {
 		this.productRepository = productRepository;
 		this.priceRepository = priceRepository;
+		this.currencyConversionService = currencyConversionService;
 	}
 
 	@Override
@@ -54,7 +60,8 @@ public class ProductApplicationService implements ProductUseCases {
 			throw new ProductNotFoundException(productId);
 		}
 
-		Price price = Price.create(productId, command.value(), command.initDate(), command.endDate());
+		Price price = Price.create(
+				productId, command.value(), command.currency(), command.initDate(), command.endDate());
 		if (priceRepository.overlaps(productId, command.initDate(), command.endDate())) {
 			throw new PriceOverlapException(productId, command.initDate(), command.endDate());
 		}
@@ -69,9 +76,24 @@ public class ProductApplicationService implements ProductUseCases {
 			throw new DomainValidationException("Price date is required");
 		}
 
-		return priceRepository.findValueAtDate(productId, date)
-				.map(CurrentPriceResult::new)
+		return priceRepository.findAtDate(productId, date)
+				.map(price -> new CurrentPriceResult(price.getValue(), price.getCurrency()))
 				.orElseGet(() -> priceNotFound(productId, date));
+	}
+
+	@Override
+	@Transactional(readOnly = true)
+	public ConvertedPriceResult getPriceAtDate(long productId, LocalDate date, com.mango.products.domain.model.CurrencyCode targetCurrency) {
+		validateProductId(productId);
+		if (date == null) {
+			throw new DomainValidationException("Price date is required");
+		}
+		if (targetCurrency == null) {
+			throw new DomainValidationException("Target currency is required");
+		}
+		Price price = priceRepository.findAtDate(productId, date)
+				.orElseGet(() -> priceNotFound(productId, date));
+		return currencyConversionService.convert(price, targetCurrency, date);
 	}
 
 	@Override
@@ -86,7 +108,7 @@ public class ProductApplicationService implements ProductUseCases {
 		return new ProductHistoryResult(product.getName(), product.getDescription(), prices);
 	}
 
-	private CurrentPriceResult priceNotFound(long productId, LocalDate date) {
+	private <T> T priceNotFound(long productId, LocalDate date) {
 		if (!productRepository.existsById(productId)) {
 			throw new ProductNotFoundException(productId);
 		}
@@ -98,7 +120,7 @@ public class ProductApplicationService implements ProductUseCases {
 	}
 
 	private static PriceResult toPriceResult(Price price) {
-		return new PriceResult(price.getValue(), price.getInitDate(), price.getEndDate());
+		return new PriceResult(price.getValue(), price.getCurrency(), price.getInitDate(), price.getEndDate());
 	}
 
 	private static void validateProductId(long productId) {

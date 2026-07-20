@@ -13,6 +13,7 @@ public final class PricePersistenceMapper {
 				price.getId(),
 				price.getProductId(),
 				price.getValue(),
+				price.getCurrency(),
 				price.getInitDate(),
 				price.getEndDate());
 	}
@@ -22,6 +23,7 @@ public final class PricePersistenceMapper {
 				entity.getId(),
 				entity.getProductId(),
 				entity.getValue(),
+				entity.getCurrency(),
 				entity.getInitDate(),
 				entity.getEndDate());
 	}

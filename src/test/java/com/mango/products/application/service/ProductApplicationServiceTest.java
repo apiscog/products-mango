@@ -19,6 +19,7 @@ import com.mango.products.application.exception.ProductNotFoundException;
 import com.mango.products.application.port.in.command.AddPriceCommand;
 import com.mango.products.application.port.in.command.CreateProductCommand;
 import com.mango.products.application.port.in.result.CurrentPriceResult;
+import com.mango.products.application.port.in.result.ConvertedPriceResult;
 import com.mango.products.application.port.in.result.PriceResult;
 import com.mango.products.application.port.in.result.ProductHistoryResult;
 import com.mango.products.application.port.in.result.ProductResult;
@@ -27,6 +28,7 @@ import com.mango.products.application.port.out.ProductRepository;
 import com.mango.products.domain.exception.DomainValidationException;
 import com.mango.products.domain.model.Price;
 import com.mango.products.domain.model.Product;
+import com.mango.products.domain.model.CurrencyCode;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -53,11 +55,15 @@ class ProductApplicationServiceTest {
 	@Mock
 	private PriceRepository priceRepository;
 
+	@Mock
+	private CurrencyConversionService currencyConversionService;
+
 	private ProductApplicationService service;
 
 	@BeforeEach
 	void setUp() {
-		service = new ProductApplicationService(productRepository, priceRepository);
+		service = new ProductApplicationService(
+				productRepository, priceRepository, currencyConversionService);
 	}
 
 	@Test
@@ -91,11 +97,12 @@ class ProductApplicationServiceTest {
 		when(productRepository.existsById(PRODUCT_ID)).thenReturn(true);
 		when(priceRepository.overlaps(PRODUCT_ID, INIT_DATE, END_DATE)).thenReturn(false);
 		when(priceRepository.save(any(Price.class)))
-				.thenReturn(Price.reconstitute(1L, PRODUCT_ID, VALUE, INIT_DATE, END_DATE));
+				.thenReturn(Price.reconstitute(
+						1L, PRODUCT_ID, VALUE, CurrencyCode.EUR, INIT_DATE, END_DATE));
 
 		PriceResult result = service.addPrice(PRODUCT_ID, command);
 
-		assertEquals(new PriceResult(VALUE, INIT_DATE, END_DATE), result);
+		assertEquals(new PriceResult(VALUE, CurrencyCode.EUR, INIT_DATE, END_DATE), result);
 		verify(productRepository).existsById(PRODUCT_ID);
 		verify(priceRepository, times(1)).overlaps(PRODUCT_ID, INIT_DATE, END_DATE);
 		verify(priceRepository).save(any(Price.class));
@@ -127,7 +134,8 @@ class ProductApplicationServiceTest {
 	@Test
 	void addPricePropagatesMonetaryValidationBeforeOverlapCheck() {
 		when(productRepository.existsById(PRODUCT_ID)).thenReturn(true);
-		AddPriceCommand command = new AddPriceCommand(BigDecimal.ZERO, INIT_DATE, END_DATE);
+		AddPriceCommand command = new AddPriceCommand(
+				BigDecimal.ZERO, CurrencyCode.EUR, INIT_DATE, END_DATE);
 
 		assertThrows(DomainValidationException.class, () -> service.addPrice(PRODUCT_ID, command));
 
@@ -138,7 +146,8 @@ class ProductApplicationServiceTest {
 	@Test
 	void addPricePropagatesTemporalValidationBeforeOverlapCheck() {
 		when(productRepository.existsById(PRODUCT_ID)).thenReturn(true);
-		AddPriceCommand command = new AddPriceCommand(VALUE, INIT_DATE, INIT_DATE);
+		AddPriceCommand command = new AddPriceCommand(
+				VALUE, CurrencyCode.EUR, INIT_DATE, INIT_DATE);
 
 		assertThrows(DomainValidationException.class, () -> service.addPrice(PRODUCT_ID, command));
 
@@ -156,18 +165,20 @@ class ProductApplicationServiceTest {
 
 	@Test
 	void getPriceAtDateReturnsCurrentValueWithoutCheckingProductExistence() {
-		when(priceRepository.findValueAtDate(PRODUCT_ID, INIT_DATE)).thenReturn(Optional.of(VALUE));
+		Price price = Price.reconstitute(
+				1L, PRODUCT_ID, VALUE, CurrencyCode.EUR, INIT_DATE, END_DATE);
+		when(priceRepository.findAtDate(PRODUCT_ID, INIT_DATE)).thenReturn(Optional.of(price));
 
 		CurrentPriceResult result = service.getPriceAtDate(PRODUCT_ID, INIT_DATE);
 
-		assertEquals(new CurrentPriceResult(VALUE), result);
-		verify(priceRepository).findValueAtDate(PRODUCT_ID, INIT_DATE);
+		assertEquals(new CurrentPriceResult(VALUE, CurrencyCode.EUR), result);
+		verify(priceRepository).findAtDate(PRODUCT_ID, INIT_DATE);
 		verify(productRepository, never()).existsById(PRODUCT_ID);
 	}
 
 	@Test
 	void getPriceAtDateFailsWhenProductDoesNotExist() {
-		when(priceRepository.findValueAtDate(PRODUCT_ID, INIT_DATE)).thenReturn(Optional.empty());
+		when(priceRepository.findAtDate(PRODUCT_ID, INIT_DATE)).thenReturn(Optional.empty());
 		when(productRepository.existsById(PRODUCT_ID)).thenReturn(false);
 
 		assertThrows(ProductNotFoundException.class, () -> service.getPriceAtDate(PRODUCT_ID, INIT_DATE));
@@ -177,12 +188,38 @@ class ProductApplicationServiceTest {
 
 	@Test
 	void getPriceAtDateFailsWhenProductHasNoPriceForDate() {
-		when(priceRepository.findValueAtDate(PRODUCT_ID, INIT_DATE)).thenReturn(Optional.empty());
+		when(priceRepository.findAtDate(PRODUCT_ID, INIT_DATE)).thenReturn(Optional.empty());
 		when(productRepository.existsById(PRODUCT_ID)).thenReturn(true);
 
 		assertThrows(PriceNotFoundException.class, () -> service.getPriceAtDate(PRODUCT_ID, INIT_DATE));
 
 		verify(productRepository).existsById(PRODUCT_ID);
+	}
+
+	@Test
+	void getPriceAtDateWithTargetUsesSameDateAndConversionService() {
+		Price price = Price.reconstitute(
+				1L, PRODUCT_ID, VALUE, CurrencyCode.EUR, INIT_DATE, END_DATE);
+		ConvertedPriceResult converted = new ConvertedPriceResult(
+				new BigDecimal("106.74"), CurrencyCode.USD, VALUE, CurrencyCode.EUR,
+				new BigDecimal("1.0675"), INIT_DATE);
+		when(priceRepository.findAtDate(PRODUCT_ID, INIT_DATE)).thenReturn(Optional.of(price));
+		when(currencyConversionService.convert(price, CurrencyCode.USD, INIT_DATE))
+				.thenReturn(converted);
+
+		assertEquals(converted, service.getPriceAtDate(PRODUCT_ID, INIT_DATE, CurrencyCode.USD));
+		verify(currencyConversionService).convert(price, CurrencyCode.USD, INIT_DATE);
+	}
+
+	@Test
+	void getPriceAtDateWithTargetDoesNotConvertWhenPriceIsMissing() {
+		when(priceRepository.findAtDate(PRODUCT_ID, INIT_DATE)).thenReturn(Optional.empty());
+		when(productRepository.existsById(PRODUCT_ID)).thenReturn(true);
+
+		assertThrows(
+				PriceNotFoundException.class,
+				() -> service.getPriceAtDate(PRODUCT_ID, INIT_DATE, CurrencyCode.USD));
+		verifyNoInteractions(currencyConversionService);
 	}
 
 	@Test
@@ -203,9 +240,10 @@ class ProductApplicationServiceTest {
 	@Test
 	void getPriceHistoryReturnsProductAndPreservesRepositoryOrder() {
 		Product product = Product.reconstitute(PRODUCT_ID, "Running shoes", "Limited edition");
-		Price later = Price.reconstitute(2L, PRODUCT_ID, new BigDecimal("120.00"),
+		Price later = Price.reconstitute(2L, PRODUCT_ID, new BigDecimal("120.00"), CurrencyCode.USD,
 				LocalDate.of(2025, 1, 1), LocalDate.of(2025, 6, 30));
-		Price earlier = Price.reconstitute(1L, PRODUCT_ID, VALUE, INIT_DATE, END_DATE);
+		Price earlier = Price.reconstitute(
+				1L, PRODUCT_ID, VALUE, CurrencyCode.EUR, INIT_DATE, END_DATE);
 		when(productRepository.findById(PRODUCT_ID)).thenReturn(Optional.of(product));
 		when(priceRepository.findHistoryByProductId(PRODUCT_ID)).thenReturn(List.of(later, earlier));
 
@@ -249,7 +287,8 @@ class ProductApplicationServiceTest {
 	@Test
 	void getPriceHistoryReturnsAnImmutableDefensiveList() {
 		Product product = Product.reconstitute(PRODUCT_ID, "Product", null);
-		Price price = Price.reconstitute(1L, PRODUCT_ID, VALUE, INIT_DATE, END_DATE);
+		Price price = Price.reconstitute(
+				1L, PRODUCT_ID, VALUE, CurrencyCode.EUR, INIT_DATE, END_DATE);
 		List<Price> repositoryPrices = new ArrayList<>(List.of(price));
 		when(productRepository.findById(PRODUCT_ID)).thenReturn(Optional.of(product));
 		when(priceRepository.findHistoryByProductId(PRODUCT_ID)).thenReturn(repositoryPrices);
@@ -262,7 +301,7 @@ class ProductApplicationServiceTest {
 	}
 
 	private static AddPriceCommand validPriceCommand() {
-		return new AddPriceCommand(VALUE, INIT_DATE, END_DATE);
+		return new AddPriceCommand(VALUE, CurrencyCode.EUR, INIT_DATE, END_DATE);
 	}
 
 }

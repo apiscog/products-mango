@@ -158,6 +158,7 @@ Respuesta `201 Created`:
 ```json
 {
   "value": 99.99,
+  "currency": "EUR",
   "initDate": "2024-01-01",
   "endDate": "2024-06-30"
 }
@@ -181,7 +182,8 @@ Respuesta `200 OK`:
 
 ```json
 {
-  "value": 99.99
+  "value": 99.99,
+  "currency": "EUR"
 }
 ```
 
@@ -200,11 +202,13 @@ Respuesta `200 OK`:
   "prices": [
     {
       "value": 99.99,
+      "currency": "EUR",
       "initDate": "2024-01-01",
       "endDate": "2024-06-30"
     },
     {
       "value": 129.99,
+      "currency": "EUR",
       "initDate": "2024-07-01",
       "endDate": null
     }
@@ -368,7 +372,7 @@ PostgreSQL.
   ceremoniales para cada clase.
 - **Sin relaciones JPA navegables:** evita cargar historiales o productos cuando la operación solo
   necesita un valor o un `productId`.
-- **Consultas específicas:** el precio vigente proyecta únicamente `value`; el historial se recupera
+- **Consultas específicas:** el precio vigente recupera solo la fila temporal y su moneda; el historial se recupera
   ordenado por `initDate` e `id`.
 - **Exclusión PostgreSQL:** mantiene la invariante de solapamiento bajo concurrencia, donde una
   comprobación Java aislada no sería suficiente.
@@ -396,16 +400,96 @@ performance                        # Script k6 reproducible
 docs                               # Resultados y análisis de rendimiento
 ```
 
+## Bonus: Multiple currencies and historical conversion
+
+Esta rama opcional, `feature/exchange-currency`, parte directamente de `master`. La rama `master`
+mantiene la entrega base sin esta funcionalidad.
+
+Cada precio conserva una moneda original de un conjunto cerrado: `EUR`, `USD`, `GBP`, `JPY` y
+`CHF`. Si `currency` se omite o se envía como `null` al crear un precio, el adaptador REST aplica
+`EUR` para conservar compatibilidad con los clientes y con el benchmark originales. Los códigos se
+aceptan sin distinguir mayúsculas/minúsculas, pero PostgreSQL siempre almacena el enum en mayúsculas.
+
+Creación explícita:
+
+```bash
+curl -X POST http://localhost:8080/products/1/prices \
+  -H 'Content-Type: application/json' \
+  -d '{"value":99.99,"currency":"EUR","initDate":"2024-01-01","endDate":"2024-06-30"}'
+```
+
+La lectura sin conversión devuelve exclusivamente el valor y la moneda persistidos:
+
+```bash
+curl 'http://localhost:8080/products/1/prices?date=2024-04-15'
+```
+
+```json
+{"value":99.99,"currency":"EUR"}
+```
+
+La conversión es opcional y solo se admite en el precio vigente:
+
+```bash
+curl 'http://localhost:8080/products/1/prices?date=2024-04-15&currency=USD'
+```
+
+```json
+{
+  "value": 106.74,
+  "currency": "USD",
+  "originalValue": 99.99,
+  "originalCurrency": "EUR",
+  "exchangeRate": 1.0675,
+  "exchangeRateDate": "2024-04-15"
+}
+```
+
+La fecha de la tasa es la misma fecha histórica usada para localizar el precio. La conversión usa
+`BigDecimal`, no redondea la tasa y redondea solo el importe final a dos decimales con
+`RoundingMode.HALF_UP`. Como simplificación del challenge, JPY también conserva dos decimales.
+La conversión no se persiste y el historial nunca se convierte.
+
+El puerto `ExchangeRateProvider` desacopla la aplicación del proveedor. El adaptador HTTP consulta
+primero jsDelivr y, ante timeout, error de red, 5xx, 404 histórico o respuesta inválida, usa el
+fallback oficial de Cloudflare. Solo acepta una respuesta cuya fecha coincida con la solicitada.
+Los timeouts por defecto son 2 s para conexión y 3 s para lectura:
+
+- `EXCHANGE_API_PRIMARY_URL`
+- `EXCHANGE_API_FALLBACK_URL`
+- `EXCHANGE_API_CONNECT_TIMEOUT`
+- `EXCHANGE_API_READ_TIMEOUT`
+
+Las plantillas de URL deben contener `{date}` y `{base}`. Si ambos proveedores fallan, la API
+responde `503 SERVICE_UNAVAILABLE` sin exponer URLs ni cuerpos externos. Una moneda fuera del enum
+responde `400 VALIDATION_ERROR`. Cuando origen y destino coinciden se usa tasa 1 sin llamada externa.
+
+Flyway V2 añade `prices.currency VARCHAR(3)`, migra filas existentes a EUR y aplica `NOT NULL` y
+`chk_prices_currency`. La moneda no participa en `ex_prices_product_validity`: dos intervalos
+solapados del mismo producto siguen siendo inválidos aunque tengan monedas distintas.
+
+El benchmark conserva exactamente sus fases, fechas, cantidades y VUs originales. Sus requests de
+precio siguen omitiendo `currency` para verificar compatibilidad, y sus checks esperan EUR. No
+ejecuta conversiones ni depende del proveedor externo.
+
+Más detalles de diseño y validación:
+[docs/exchange-currency-results.md](docs/exchange-currency-results.md).
+
+Limitaciones específicas: el proveedor gratuito no ofrece SLA; no hay caché de tasas, criptomonedas,
+conversión del historial ni reglas de decimales por divisa. PostgreSQL sigue siendo la fuente del
+precio original; el proveedor externo solo aporta tasas.
+
 ## Limitaciones y posibles mejoras
 
 El alcance actual implementa los cuatro endpoints obligatorios, Swagger/OpenAPI y el bonus de
-rendimiento. No incluye deliberadamente autenticación, moneda, paginación, actualización o borrado.
+rendimiento. Esta rama añade el bonus opcional de monedas; no incluye autenticación, paginación,
+actualización o borrado.
 
 Si el producto evolucionara, podrían valorarse:
 
 - OAuth2/JWT.
 - Paginación del historial.
-- Moneda explícita y sus reglas.
+- Caché de tasas de cambio.
 - Actualización o eliminación de precios.
 - Observabilidad y alertas.
 - Despliegue cloud y pipeline CI/CD.
