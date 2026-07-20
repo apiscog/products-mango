@@ -88,6 +88,7 @@ y `5432` disponibles. Java y PostgreSQL locales no son necesarios cuando se util
 ```bash
 git clone https://github.com/apiscog/products-mango.git
 cd products-mango
+java tools/jwt/GenerateDevKeys.java
 docker compose up -d --build postgres app
 docker compose ps
 ```
@@ -115,6 +116,116 @@ Para eliminar también los datos locales:
 docker compose down -v
 ```
 
+## Bonus de seguridad JWT (esta rama)
+
+La rama **feature/jwt-security** anade Spring Security OAuth2 Resource Server. **master** conserva la
+entrega base sin autenticacion. Products API valida Bearer tokens RS256 y scopes antes de llegar al
+controlador; no emite tokens, no gestiona usuarios o contrasenas y no es un Authorization Server.
+
+~~~text
+Cliente -> Spring Security / JWT -> Products API -> PostgreSQL
+~~~
+
+| Acceso | Regla |
+|---|---|
+| Publico | GET health, OpenAPI y Swagger UI |
+| Lectura | scope products.read para GET /products/** |
+| Escritura | scope products.write para POST /products/** |
+
+El claim JWT scope se convierte en SCOPE_products.read o SCOPE_products.write. El writer de
+demostracion incluye ambos scopes; write no implica read de forma automatica. La API es stateless,
+no crea JSESSIONID y devuelve JSON 401 para token ausente/invalido y 403 para scope insuficiente.
+
+Cada clon genera su propio par RSA local, **solo para desarrollo y no reutilizable en produccion**:
+
+~~~text
+GenerateDevKeys.java
+|- genera tools/jwt/generated/dev-private-key.pem
++- genera config/jwt/generated/dev-public-key.pem
+
+GenerateToken.java -> usa la privada para firmar
+Products API       -> usa la publica para validar
+~~~
+
+Desde la raiz, antes de arrancar la aplicacion:
+
+~~~bash
+java tools/jwt/GenerateDevKeys.java
+docker compose up -d --build postgres app
+~~~
+
+La utilidad intenta aplicar permisos de lectura/escritura solo para el propietario a la privada en
+sistemas POSIX. En Windows avisa si ese modo no está disponible, pero genera el par correctamente.
+
+En PowerShell, genera y copia los tokens:
+
+~~~powershell
+$writerToken = java tools/jwt/GenerateToken.java writer
+$writerToken | Set-Clipboard
+$readerToken = java tools/jwt/GenerateToken.java reader
+$readerToken | Set-Clipboard
+~~~
+
+En macOS o Linux:
+
+~~~bash
+writer_token="$(java tools/jwt/GenerateToken.java writer)"
+reader_token="$(java tools/jwt/GenerateToken.java reader)"
+printf '%s\n' "$writer_token"
+# macOS:
+printf %s "$writer_token" | pbcopy
+~~~
+
+Los tokens incluyen issuer products-challenge-dev, audience products-api, expiracion aproximada de
+15 minutos y los scopes reader o writer. El generador imprime solo el token solicitado y no lo
+guarda. En Swagger UI pulsa **Authorize** y pega solo el JWT: el esquema HTTP Bearer anade el prefijo.
+
+Ejemplos minimos:
+
+~~~bash
+curl -H "Authorization: Bearer $reader_token" \
+  'http://localhost:8080/products/1/prices?date=2024-04-15'
+
+curl -X POST http://localhost:8080/products \
+  -H "Authorization: Bearer $writer_token" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Zapatillas deportivas","description":"Modelo 2025 edicion limitada"}'
+~~~
+
+Configuracion externalizable:
+
+| Variable | Desarrollo |
+|---|---|
+| JWT_PUBLIC_KEY_LOCATION | file:./config/jwt/generated/dev-public-key.pem |
+| JWT_ISSUER | products-challenge-dev |
+| JWT_AUDIENCE | products-api |
+| JWT_PRIVATE_KEY_LOCATION | tools/jwt/generated/dev-private-key.pem (solo generador) |
+| JWT_TOKEN_TTL_SECONDS | 900 (solo generador, maximo 3600) |
+
+En produccion debe montarse una clave publica externa, por ejemplo
+file:/run/secrets/products-public-key.pem, usar HTTPS y delegar emision, custodia de clave privada,
+rotacion y revocacion en un proveedor de identidad. No debe copiarse la clave privada al contenedor.
+Los detalles de pruebas y coste medido estan en
+[docs/jwt-security-results.md](docs/jwt-security-results.md).
+
+### Solución de problemas de claves
+
+Si falta la clave pública o la privada, ejecuta desde la raíz:
+
+~~~bash
+java tools/jwt/GenerateDevKeys.java
+~~~
+
+Si solo existe una de las dos, el par está incompleto y la utilidad falla sin modificar el archivo
+restante. Elimina conscientemente ambos archivos o regenera el par completo:
+
+~~~bash
+java tools/jwt/GenerateDevKeys.java --force
+~~~
+
+La opción **--force** sustituye ambas claves como una unidad. Los tokens emitidos con el par anterior
+dejan de ser válidos porque Products API pasa a verificar con una clave pública nueva.
+
 ## API y ejemplos
 
 Las fechas usan el formato ISO `yyyy-MM-dd`. Los comandos están escritos para Bash; en PowerShell se
@@ -131,6 +242,7 @@ recomienda `Invoke-RestMethod` con un body generado mediante `ConvertTo-Json`.
 
 ```bash
 curl -i -X POST http://localhost:8080/products \
+  -H "Authorization: Bearer $writer_token" \
   -H 'Content-Type: application/json' \
   -d '{"name":"Zapatillas deportivas","description":"Modelo 2025 edición limitada"}'
 ```
@@ -149,6 +261,7 @@ Respuesta `201 Created`, con la cabecera `Location: /products/1`:
 
 ```bash
 curl -i -X POST http://localhost:8080/products/1/prices \
+  -H "Authorization: Bearer $writer_token" \
   -H 'Content-Type: application/json' \
   -d '{"value":99.99,"initDate":"2024-01-01","endDate":"2024-06-30"}'
 ```
@@ -167,6 +280,7 @@ Un precio indefinido se crea con `"endDate": null`:
 
 ```bash
 curl -i -X POST http://localhost:8080/products/1/prices \
+  -H "Authorization: Bearer $writer_token" \
   -H 'Content-Type: application/json' \
   -d '{"value":129.99,"initDate":"2024-07-01","endDate":null}'
 ```
@@ -174,7 +288,8 @@ curl -i -X POST http://localhost:8080/products/1/prices \
 ### Consultar el precio vigente
 
 ```bash
-curl 'http://localhost:8080/products/1/prices?date=2024-04-15'
+curl -H "Authorization: Bearer $reader_token" \
+  'http://localhost:8080/products/1/prices?date=2024-04-15'
 ```
 
 Respuesta `200 OK`:
@@ -188,7 +303,7 @@ Respuesta `200 OK`:
 ### Consultar el historial
 
 ```bash
-curl http://localhost:8080/products/1/prices
+curl -H "Authorization: Bearer $reader_token" http://localhost:8080/products/1/prices
 ```
 
 Respuesta `200 OK`:
@@ -238,6 +353,10 @@ Todos los errores controlados siguen esta estructura:
 | 409 | `PRICE_OVERLAP` | El periodo se solapa con otro precio del producto |
 | 500 | `INTERNAL_ERROR` | Error inesperado, sin detalles internos en la respuesta |
 
+La capa de seguridad usa el mismo envelope: 401 UNAUTHORIZED para token ausente o inválido y
+403 FORBIDDEN para un JWT válido sin el scope requerido. Nunca incluye el token, claves, stack trace
+o detalles criptográficos.
+
 Un error de validación añade los campos afectados:
 
 ```json
@@ -275,6 +394,10 @@ Linux/macOS: `./mvnw spring-boot:run`
 Flyway se ejecuta al arrancar. Docker Compose sigue siendo la opción recomendada para evaluar la
 entrega porque fija la versión de PostgreSQL y evita dependencias externas como Neon.
 
+La seguridad usa además JWT_PUBLIC_KEY_LOCATION (file:./config/jwt/generated/dev-public-key.pem),
+JWT_ISSUER (products-challenge-dev) y JWT_AUDIENCE (products-api). Estos valores pueden
+externalizarse sin cambiar el artefacto.
+
 ## Tests
 
 ### Tests rápidos
@@ -296,22 +419,25 @@ Además de los tests rápidos, Failsafe ejecuta los tests `*IT` con PostgreSQL r
 Testcontainers: migración Flyway, adaptadores de persistencia, restricción de exclusión, concurrencia
 y peticiones HTTP end-to-end en un puerto aleatorio. No se utiliza H2 ni Docker Compose en estos tests.
 
-Totales actuales:
+Totales actuales de esta rama:
 
-- 80 tests rápidos.
-- 22 tests de persistencia PostgreSQL.
-- 16 ejecuciones end-to-end HTTP.
-- 118 tests en total.
+- 92 tests rápidos, incluidos seguridad WebMvc y generación local de claves.
+- 51 ejecuciones de integración, incluidas 13 de JWT real.
+- 143 ejecuciones en total.
 
 Estos totales son una referencia y pueden crecer con la suite.
 
 ## Benchmark de rendimiento
+
+En esta rama el recorrido medido es k6 -> Spring Security/JWT -> Products API -> PostgreSQL. El
+escenario, cantidades, VUs, fechas, orden y thresholds siguen siendo exactamente los de master.
 
 El benchmark mide `k6 -> Products API -> PostgreSQL` y reproduce el escenario de `benchmark.sh`
 proporcionado con el challenge. Utiliza `grafana/k6:1.7.1`, no requiere instalar k6 localmente y
 permanece bajo el profile `benchmark`.
 
 ```bash
+export ACCESS_TOKEN="$(java tools/jwt/GenerateToken.java writer)"
 docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
 ```
 
@@ -335,7 +461,15 @@ durante la carga. Variables configurables:
 | `PRICE_QUERY_VUS` | `500` |
 | `HISTORY_QUERY_VUS` | `500` |
 
-Ejemplo PowerShell:
+ACCESS_TOKEN es obligatorio y run-benchmark.sh falla antes del setup si falta. El token no se
+imprime ni se guarda. En PowerShell:
+
+~~~powershell
+$env:ACCESS_TOKEN = java tools/jwt/GenerateToken.java writer
+docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
+~~~
+
+Ejemplo PowerShell para reducir solo la concurrencia:
 
 ```powershell
 $env:PRICE_QUERY_VUS='250'; $env:HISTORY_QUERY_VUS='250'; docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
@@ -345,10 +479,13 @@ k6 valida status, `Content-Type`, JSON y contrato esperado. Muestra duración, t
 checks, avg, mediana, p90, p95, p99 y máximo por fase. Los thresholds exigen cero estados inesperados,
 5xx, contratos inválidos e iteraciones descartadas; más de 99 % de checks y menos de 1 % de fallos HTTP.
 
-Dos ejecuciones locales —la segunda conservando el volumen— completaron exactamente
-1.000/20.000/15.000 peticiones, 100 % de checks y 0 % de errores en unos 38 segundos. Con 500 VUs, la
-API utilizó aproximadamente su límite de una CPU. Los percentiles, consumo y limitaciones están en
-[docs/performance-results.md](docs/performance-results.md); no son un SLA ni una predicción universal.
+La línea base sin seguridad permanece en [docs/performance-results.md](docs/performance-results.md).
+Dos ejecuciones JWT —la segunda conservando el volumen— completaron exactamente
+1.000/20.000/15.000 peticiones, 100 % de checks y 0 % de errores en 63 y 57 segundos. Con 500 VUs,
+la API utilizó aproximadamente su límite de una CPU; RS256 por petición tuvo un coste medible.
+La comparación está en [docs/jwt-security-results.md](docs/jwt-security-results.md); no es un SLA.
+Cambiar de claves fijas a un par local generado no altera RS256 ni el coste por petición, por lo que
+estas cifras no se repitieron.
 
 Cada ejecución añade datos únicos al volumen. Para repetir desde una base vacía, debe ejecutarse
 explícitamente `docker compose down -v`; el script k6 no elimina datos ni accede directamente a
@@ -398,12 +535,13 @@ docs                               # Resultados y análisis de rendimiento
 
 ## Limitaciones y posibles mejoras
 
-El alcance actual implementa los cuatro endpoints obligatorios, Swagger/OpenAPI y el bonus de
-rendimiento. No incluye deliberadamente autenticación, moneda, paginación, actualización o borrado.
+Esta rama implementa los cuatro endpoints obligatorios, Swagger/OpenAPI, el benchmark y el bonus JWT.
+No incluye gestión de usuarios, emisión o revocación inmediata de tokens, moneda, paginación,
+actualización o borrado.
 
 Si el producto evolucionara, podrían valorarse:
 
-- OAuth2/JWT.
+- Integración con un proveedor de identidad productivo y rotación de claves.
 - Paginación del historial.
 - Moneda explícita y sus reglas.
 - Actualización o eliminación de precios.
@@ -424,4 +562,5 @@ Estas opciones no eran necesarias para el challenge y no se presentan como funci
 | Detener y borrar datos | `docker compose down -v` |
 | Tests rápidos en Windows | `.\mvnw.cmd test` |
 | Suite completa en Windows | `.\mvnw.cmd verify` |
-| Benchmark | `docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark` |
+| Generar writer JWT (PowerShell) | `$env:ACCESS_TOKEN = java tools/jwt/GenerateToken.java writer` |
+| Benchmark (requiere ACCESS_TOKEN) | `docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark` |
