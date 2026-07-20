@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mango.products.PostgreSQLIntegrationTestBase;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,6 +18,15 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
+
+import com.mango.products.application.exception.ExchangeRateUnavailableException;
+import com.mango.products.application.model.ExchangeRate;
+import com.mango.products.application.port.out.ExchangeRateProvider;
+import com.mango.products.domain.model.CurrencyCode;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -36,11 +46,12 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@Import(ProductsApiIT.ExchangeTestConfiguration.class)
 class ProductsApiIT extends PostgreSQLIntegrationTestBase {
 
     private static final Set<String> PRODUCT_FIELDS = Set.of("id", "name", "description");
-    private static final Set<String> PRICE_FIELDS = Set.of("value", "initDate", "endDate");
-    private static final Set<String> CURRENT_PRICE_FIELDS = Set.of("value");
+    private static final Set<String> PRICE_FIELDS = Set.of("value", "currency", "initDate", "endDate");
+    private static final Set<String> CURRENT_PRICE_FIELDS = Set.of("value", "currency");
     private static final Set<String> HISTORY_FIELDS = Set.of("name", "description", "prices");
 
     @LocalServerPort
@@ -54,6 +65,14 @@ class ProductsApiIT extends PostgreSQLIntegrationTestBase {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private StubExchangeRateProvider exchangeRateProvider;
+
+    @BeforeEach
+    void resetExchangeRateProvider() {
+        exchangeRateProvider.reset();
+    }
 
     @Test
     void createsAndPersistsProductWithExactHttpContract() throws Exception {
@@ -105,6 +124,60 @@ class ProductsApiIT extends PostgreSQLIntegrationTestBase {
     }
 
     @Test
+    void supportsExplicitCurrencyOriginalReadingAndHistoricalConversion() throws Exception {
+        long eurProduct = createProduct("EUR product", null);
+        ResponseEntity<String> defaultEur = addPrice(
+                eurProduct, "99.99", "2024-01-01", "2024-06-30");
+        assertEquals("EUR", json(defaultEur).required("currency").textValue());
+
+        ResponseEntity<String> convertedResponse = get(
+                "/products/" + eurProduct + "/prices?date=2024-04-15&currency=usd");
+        assertEquals(HttpStatus.OK, convertedResponse.getStatusCode());
+        JsonNode converted = json(convertedResponse);
+        assertEquals(Set.of(
+                        "value", "currency", "originalValue", "originalCurrency",
+                        "exchangeRate", "exchangeRateDate"),
+                fieldNames(converted));
+        assertEquals(0, new BigDecimal("106.74").compareTo(converted.required("value").decimalValue()));
+        assertEquals("USD", converted.required("currency").textValue());
+        assertEquals("EUR", converted.required("originalCurrency").textValue());
+        assertEquals("2024-04-15", converted.required("exchangeRateDate").textValue());
+
+        long usdProduct = createProduct("USD product", null);
+        ResponseEntity<String> explicitUsd = post("/products/" + usdProduct + "/prices", """
+                {"value":100.00,"currency":"usd","initDate":"2024-01-01","endDate":"2024-06-30"}
+                """);
+        assertEquals(HttpStatus.CREATED, explicitUsd.getStatusCode());
+        assertEquals("USD", json(explicitUsd).required("currency").textValue());
+        assertEquals("USD", json(get(
+                "/products/" + usdProduct + "/prices?date=2024-04-15"))
+                .required("currency").textValue());
+    }
+
+    @Test
+    void sameCurrencySkipsProviderUnsupportedCurrencyIsBadRequestAndOutageIs503() throws Exception {
+        long productId = createProduct("Product", null);
+        addPrice(productId, "99.99", "2024-01-01", "2024-06-30");
+
+        ResponseEntity<String> same = get(
+                "/products/" + productId + "/prices?date=2024-04-15&currency=EUR");
+        assertEquals(HttpStatus.OK, same.getStatusCode());
+        assertEquals(0, exchangeRateProvider.calls);
+        assertEquals(0, BigDecimal.ONE.compareTo(json(same).required("exchangeRate").decimalValue()));
+
+        ResponseEntity<String> unsupported = get(
+                "/products/" + productId + "/prices?date=2024-04-15&currency=CAD");
+        assertError(unsupported, HttpStatus.BAD_REQUEST, "VALIDATION_ERROR",
+                "/products/" + productId + "/prices");
+
+        exchangeRateProvider.unavailable = true;
+        ResponseEntity<String> unavailable = get(
+                "/products/" + productId + "/prices?date=2024-04-15&currency=USD");
+        assertError(unavailable, HttpStatus.SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE",
+                "/products/" + productId + "/prices");
+    }
+
+    @Test
     void getsFinitePriceAtInclusiveBoundariesAndNotAfterEnd() throws Exception {
         long productId = createProduct("Product", null);
         assertEquals(HttpStatus.CREATED,
@@ -149,6 +222,7 @@ class ProductsApiIT extends PostgreSQLIntegrationTestBase {
         assertEquals(3, prices.size());
         for (JsonNode price : prices) {
             assertOnlyFields(price, PRICE_FIELDS);
+            assertEquals("EUR", price.required("currency").textValue());
             assertFalse(price.has("id"));
             assertFalse(price.has("validity"));
         }
@@ -349,6 +423,12 @@ class ProductsApiIT extends PostgreSQLIntegrationTestBase {
         assertEquals(expected, actual);
     }
 
+    private static Set<String> fieldNames(JsonNode node) {
+        Set<String> fields = new HashSet<>();
+        node.fieldNames().forEachRemaining(fields::add);
+        return fields;
+    }
+
     private void assertPriceCreated(
             ResponseEntity<String> response,
             String value,
@@ -360,6 +440,7 @@ class ProductsApiIT extends PostgreSQLIntegrationTestBase {
         JsonNode body = json(response);
         assertOnlyFields(body, PRICE_FIELDS);
         assertEquals(0, new BigDecimal(value).compareTo(body.required("value").decimalValue()));
+        assertEquals("EUR", body.required("currency").textValue());
         assertEquals(initDate, body.required("initDate").textValue());
         if (endDate == null) {
             assertTrue(body.required("endDate").isNull());
@@ -376,6 +457,7 @@ class ProductsApiIT extends PostgreSQLIntegrationTestBase {
         JsonNode body = json(response);
         assertOnlyFields(body, CURRENT_PRICE_FIELDS);
         assertEquals(0, new BigDecimal(expectedValue).compareTo(body.required("value").decimalValue()));
+        assertEquals("EUR", body.required("currency").textValue());
     }
 
     private JsonNode assertError(
@@ -452,6 +534,38 @@ class ProductsApiIT extends PostgreSQLIntegrationTestBase {
     }
 
     private record PriceRequest(BigDecimal value, String initDate, String endDate) {
+    }
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class ExchangeTestConfiguration {
+
+        @Bean
+        @Primary
+        StubExchangeRateProvider stubExchangeRateProvider() {
+            return new StubExchangeRateProvider();
+        }
+    }
+
+    static final class StubExchangeRateProvider implements ExchangeRateProvider {
+        private int calls;
+        private boolean unavailable;
+
+        @Override
+        public ExchangeRate getRate(CurrencyCode source, CurrencyCode target, java.time.LocalDate date) {
+            calls++;
+            if (unavailable) {
+                throw new ExchangeRateUnavailableException();
+            }
+            BigDecimal rate = source == CurrencyCode.USD
+                    ? new BigDecimal("0.91234567")
+                    : new BigDecimal("1.0675");
+            return new ExchangeRate(source, target, rate, date);
+        }
+
+        void reset() {
+            calls = 0;
+            unavailable = false;
+        }
     }
 
     @FunctionalInterface
