@@ -5,6 +5,7 @@ import { Counter, Rate, Trend } from 'k6/metrics';
 
 const BASE_URL = __ENV.BASE_URL || 'http://app:8080';
 const MODE = __ENV.MODE || 'setup';
+const ACCESS_TOKEN = __ENV.ACCESS_TOKEN || '';
 
 const PRODUCT_CREATION_ITERATIONS = 1000;
 const PRICE_QUERY_ITERATIONS = 20000;
@@ -327,12 +328,18 @@ function exactFields(body, expectedFields) {
 }
 
 function request(name, phase) {
-    return { tags: { name, phase } };
+    return {
+        headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+        tags: { name, phase },
+    };
 }
 
 function jsonRequest(name, phase) {
     return {
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+            Authorization: `Bearer ${ACCESS_TOKEN}`,
+            'Content-Type': 'application/json',
+        },
         tags: { name, phase },
     };
 }

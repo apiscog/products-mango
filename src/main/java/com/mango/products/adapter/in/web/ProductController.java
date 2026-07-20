@@ -20,6 +20,7 @@ import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -39,6 +40,7 @@ import java.time.LocalDate;
 @RestController
 @RequestMapping("/products")
 @Validated
+@SecurityRequirement(name = "bearerAuth")
 public class ProductController {
 
     private final ProductUseCases productUseCases;
