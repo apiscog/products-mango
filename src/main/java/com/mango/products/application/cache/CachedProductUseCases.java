@@ -11,10 +11,13 @@ import com.mango.products.application.port.in.ProductUseCases;
 import com.mango.products.application.port.in.command.AddPriceCommand;
 import com.mango.products.application.port.in.command.CreateProductCommand;
 import com.mango.products.application.port.in.result.CurrentPriceResult;
+import com.mango.products.application.port.in.result.ConvertedPriceResult;
 import com.mango.products.application.port.in.result.PriceResult;
 import com.mango.products.application.port.in.result.ProductHistoryResult;
 import com.mango.products.application.port.in.result.ProductResult;
 import com.mango.products.application.service.ProductApplicationService;
+import com.mango.products.application.service.CurrencyConversionService;
+import com.mango.products.domain.model.CurrencyCode;
 
 @Primary
 @Service
@@ -23,12 +26,18 @@ public class CachedProductUseCases implements ProductUseCases {
 
 	private final ProductApplicationService delegate;
 	private final ProductCacheInvalidator cacheInvalidator;
+	private final CachedPriceQueryService priceQueryService;
+	private final CurrencyConversionService currencyConversionService;
 
 	public CachedProductUseCases(
 			ProductApplicationService delegate,
-			ProductCacheInvalidator cacheInvalidator) {
+			ProductCacheInvalidator cacheInvalidator,
+			CachedPriceQueryService priceQueryService,
+			CurrencyConversionService currencyConversionService) {
 		this.delegate = delegate;
 		this.cacheInvalidator = cacheInvalidator;
+		this.priceQueryService = priceQueryService;
+		this.currencyConversionService = currencyConversionService;
 	}
 
 	@Override
@@ -44,12 +53,17 @@ public class CachedProductUseCases implements ProductUseCases {
 	}
 
 	@Override
-	@Cacheable(
-			cacheNames = ProductCacheNames.CURRENT_PRICE,
-			key = "@productCacheKeyService.currentPriceKey(#productId, #date)",
-			unless = "#result == null")
 	public CurrentPriceResult getPriceAtDate(long productId, LocalDate date) {
-		return delegate.getPriceAtDate(productId, date);
+		return priceQueryService.getOriginalPriceAtDate(productId, date);
+	}
+
+	@Override
+	public ConvertedPriceResult getPriceAtDate(
+			long productId,
+			LocalDate date,
+			CurrencyCode targetCurrency) {
+		CurrentPriceResult original = priceQueryService.getOriginalPriceAtDate(productId, date);
+		return currencyConversionService.convert(original, targetCurrency, date);
 	}
 
 	@Override

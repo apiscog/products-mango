@@ -19,6 +19,7 @@ import org.springframework.data.redis.core.RedisCallback;
 import com.mango.products.RedisIntegrationTestBase;
 import com.mango.products.application.port.in.ProductUseCases;
 import com.mango.products.application.port.in.command.AddPriceCommand;
+import com.mango.products.domain.model.CurrencyCode;
 import com.mango.products.application.port.in.command.CreateProductCommand;
 import com.mango.products.application.port.in.result.CurrentPriceResult;
 import com.mango.products.application.port.in.result.ProductHistoryResult;
@@ -150,6 +151,7 @@ class RedisCacheIT extends RedisIntegrationTestBase {
 	private void addPrice(long productId, String value, String initDate, String endDate) {
 		useCases.addPrice(productId, new AddPriceCommand(
 				new BigDecimal(value),
+				CurrencyCode.EUR,
 				LocalDate.parse(initDate),
 				endDate == null ? null : LocalDate.parse(endDate)));
 	}

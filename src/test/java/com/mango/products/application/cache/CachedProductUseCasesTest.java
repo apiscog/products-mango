@@ -34,10 +34,13 @@ import com.mango.products.application.exception.PriceOverlapException;
 import com.mango.products.application.port.in.ProductUseCases;
 import com.mango.products.application.port.in.command.AddPriceCommand;
 import com.mango.products.application.port.in.result.CurrentPriceResult;
+import com.mango.products.application.port.in.result.ConvertedPriceResult;
 import com.mango.products.application.port.in.result.PriceResult;
 import com.mango.products.application.port.in.result.ProductHistoryResult;
 import com.mango.products.application.service.ProductApplicationService;
+import com.mango.products.application.service.CurrencyConversionService;
 import com.mango.products.domain.exception.DomainValidationException;
+import com.mango.products.domain.model.CurrencyCode;
 
 @ExtendWith(SpringExtension.class)
 @ContextConfiguration(classes = CachedProductUseCasesTest.TestConfiguration.class)
@@ -53,6 +56,9 @@ class CachedProductUseCasesTest {
 	private ProductApplicationService delegate;
 
 	@Autowired
+	private CurrencyConversionService currencyConversionService;
+
+	@Autowired
 	private CacheManager cacheManager;
 
 	@Autowired
@@ -60,7 +66,7 @@ class CachedProductUseCasesTest {
 
 	@BeforeEach
 	void resetState() {
-		reset(delegate);
+		reset(delegate, currencyConversionService);
 		cacheManager.getCache(ProductCacheNames.CURRENT_PRICE).clear();
 		cacheManager.getCache(ProductCacheNames.PRICE_HISTORY).clear();
 		versionStore.clear();
@@ -68,7 +74,7 @@ class CachedProductUseCasesTest {
 
 	@Test
 	void secondCurrentPriceQueryUsesCacheInsteadOfDelegate() {
-		CurrentPriceResult expected = new CurrentPriceResult(new BigDecimal("99.99"));
+		CurrentPriceResult expected = new CurrentPriceResult(new BigDecimal("99.99"), CurrencyCode.EUR);
 		when(delegate.getPriceAtDate(1L, DATE)).thenReturn(expected);
 
 		assertEquals(expected, useCases.getPriceAtDate(1L, DATE));
@@ -80,9 +86,9 @@ class CachedProductUseCasesTest {
 	@Test
 	void currentPriceKeysDifferByProductAndDate() {
 		LocalDate anotherDate = DATE.plusDays(1);
-		when(delegate.getPriceAtDate(1L, DATE)).thenReturn(new CurrentPriceResult(BigDecimal.ONE));
-		when(delegate.getPriceAtDate(1L, anotherDate)).thenReturn(new CurrentPriceResult(BigDecimal.TWO));
-		when(delegate.getPriceAtDate(2L, DATE)).thenReturn(new CurrentPriceResult(BigDecimal.TEN));
+		when(delegate.getPriceAtDate(1L, DATE)).thenReturn(new CurrentPriceResult(BigDecimal.ONE, CurrencyCode.EUR));
+		when(delegate.getPriceAtDate(1L, anotherDate)).thenReturn(new CurrentPriceResult(BigDecimal.TWO, CurrencyCode.EUR));
+		when(delegate.getPriceAtDate(2L, DATE)).thenReturn(new CurrentPriceResult(BigDecimal.TEN, CurrencyCode.USD));
 
 		useCases.getPriceAtDate(1L, DATE);
 		useCases.getPriceAtDate(1L, anotherDate);
@@ -108,13 +114,13 @@ class CachedProductUseCasesTest {
 
 	@Test
 	void successfulAddInvalidatesOnlyThatProductsCurrentPricesAndHistory() {
-		when(delegate.getPriceAtDate(1L, DATE)).thenReturn(new CurrentPriceResult(BigDecimal.ONE));
-		when(delegate.getPriceAtDate(2L, DATE)).thenReturn(new CurrentPriceResult(BigDecimal.TWO));
+		when(delegate.getPriceAtDate(1L, DATE)).thenReturn(new CurrentPriceResult(BigDecimal.ONE, CurrencyCode.EUR));
+		when(delegate.getPriceAtDate(2L, DATE)).thenReturn(new CurrentPriceResult(BigDecimal.TWO, CurrencyCode.USD));
 		when(delegate.getPriceHistory(1L)).thenReturn(history("1.00"));
 		AddPriceCommand command = new AddPriceCommand(
-				new BigDecimal("20.00"), LocalDate.of(2025, 1, 1), null);
+				new BigDecimal("20.00"), CurrencyCode.USD, LocalDate.of(2025, 1, 1), null);
 		when(delegate.addPrice(1L, command)).thenReturn(new PriceResult(
-				command.value(), command.initDate(), command.endDate()));
+				command.value(), command.currency(), command.initDate(), command.endDate()));
 
 		useCases.getPriceAtDate(1L, DATE);
 		useCases.getPriceAtDate(2L, DATE);
@@ -133,9 +139,10 @@ class CachedProductUseCasesTest {
 
 	@Test
 	void failedAddDoesNotInvalidateCachedQueries() {
-		when(delegate.getPriceAtDate(1L, DATE)).thenReturn(new CurrentPriceResult(BigDecimal.ONE));
+		when(delegate.getPriceAtDate(1L, DATE)).thenReturn(new CurrentPriceResult(BigDecimal.ONE, CurrencyCode.EUR));
 		AddPriceCommand command = new AddPriceCommand(
-				new BigDecimal("20.00"), LocalDate.of(2024, 1, 1), LocalDate.of(2024, 6, 30));
+				new BigDecimal("20.00"), CurrencyCode.EUR,
+				LocalDate.of(2024, 1, 1), LocalDate.of(2024, 6, 30));
 		when(delegate.addPrice(1L, command)).thenThrow(
 				new PriceOverlapException(1L, command.initDate(), command.endDate()));
 
@@ -158,6 +165,22 @@ class CachedProductUseCasesTest {
 	}
 
 	@Test
+	void convertedQueriesReuseCachedOriginalButAreCalculatedOnEveryRequest() {
+		CurrentPriceResult original = new CurrentPriceResult(new BigDecimal("99.99"), CurrencyCode.EUR);
+		ConvertedPriceResult converted = new ConvertedPriceResult(
+				new BigDecimal("106.74"), CurrencyCode.USD,
+				original.value(), original.currency(), new BigDecimal("1.0675"), DATE);
+		when(delegate.getPriceAtDate(1L, DATE)).thenReturn(original);
+		when(currencyConversionService.convert(original, CurrencyCode.USD, DATE)).thenReturn(converted);
+
+		assertEquals(converted, useCases.getPriceAtDate(1L, DATE, CurrencyCode.USD));
+		assertEquals(converted, useCases.getPriceAtDate(1L, DATE, CurrencyCode.USD));
+
+		verify(delegate, times(1)).getPriceAtDate(1L, DATE);
+		verify(currencyConversionService, times(2)).convert(original, CurrencyCode.USD, DATE);
+	}
+
+	@Test
 	void invalidIdentifiersAndNullDatesDoNotReadCacheVersion() {
 		assertThrows(DomainValidationException.class, () -> useCases.getPriceAtDate(0L, DATE));
 		assertThrows(DomainValidationException.class, () -> useCases.getPriceAtDate(1L, null));
@@ -171,7 +194,8 @@ class CachedProductUseCasesTest {
 		return new ProductHistoryResult(
 				"Product",
 				"Description",
-				List.of(new PriceResult(new BigDecimal(value), LocalDate.of(2024, 1, 1), null)));
+				List.of(new PriceResult(
+						new BigDecimal(value), CurrencyCode.EUR, LocalDate.of(2024, 1, 1), null)));
 	}
 
 	@Configuration
@@ -181,6 +205,11 @@ class CachedProductUseCasesTest {
 		@Bean
 		ProductApplicationService delegate() {
 			return mock(ProductApplicationService.class);
+		}
+
+		@Bean
+		CurrencyConversionService currencyConversionService() {
+			return mock(CurrencyConversionService.class);
 		}
 
 		@Bean
@@ -199,10 +228,18 @@ class CachedProductUseCasesTest {
 		}
 
 		@Bean
+		CachedPriceQueryService cachedPriceQueryService(ProductApplicationService delegate) {
+			return new CachedPriceQueryService(delegate);
+		}
+
+		@Bean
 		CachedProductUseCases cachedProductUseCases(
 				ProductApplicationService delegate,
-				ProductCacheInvalidator cacheInvalidator) {
-			return new CachedProductUseCases(delegate, cacheInvalidator);
+				ProductCacheInvalidator cacheInvalidator,
+				CachedPriceQueryService cachedPriceQueryService,
+				CurrencyConversionService currencyConversionService) {
+			return new CachedProductUseCases(
+					delegate, cacheInvalidator, cachedPriceQueryService, currencyConversionService);
 		}
 
 		@Bean

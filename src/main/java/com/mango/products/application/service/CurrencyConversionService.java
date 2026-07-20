@@ -7,6 +7,7 @@ import java.time.LocalDate;
 import org.springframework.stereotype.Service;
 
 import com.mango.products.application.model.ExchangeRate;
+import com.mango.products.application.port.in.result.CurrentPriceResult;
 import com.mango.products.application.port.in.result.ConvertedPriceResult;
 import com.mango.products.application.port.out.ExchangeRateProvider;
 import com.mango.products.domain.exception.DomainValidationException;
@@ -29,6 +30,19 @@ public class CurrencyConversionService {
 		if (price == null) {
 			throw new DomainValidationException("Price to convert is required");
 		}
+		return convert(
+				new CurrentPriceResult(price.getValue(), price.getCurrency()),
+				targetCurrency,
+				date);
+	}
+
+	public ConvertedPriceResult convert(
+			CurrentPriceResult original,
+			CurrencyCode targetCurrency,
+			LocalDate date) {
+		if (original == null) {
+			throw new DomainValidationException("Original price is required");
+		}
 		if (targetCurrency == null) {
 			throw new DomainValidationException("Target currency is required");
 		}
@@ -36,17 +50,17 @@ public class CurrencyConversionService {
 			throw new DomainValidationException("Exchange rate date is required");
 		}
 
-		ExchangeRate exchangeRate = price.getCurrency() == targetCurrency
-				? new ExchangeRate(price.getCurrency(), targetCurrency, IDENTITY_RATE, date)
-				: exchangeRateProvider.getRate(price.getCurrency(), targetCurrency, date);
-		BigDecimal converted = price.getValue()
+		ExchangeRate exchangeRate = original.currency() == targetCurrency
+				? new ExchangeRate(original.currency(), targetCurrency, IDENTITY_RATE, date)
+				: exchangeRateProvider.getRate(original.currency(), targetCurrency, date);
+		BigDecimal converted = original.value()
 				.multiply(exchangeRate.rate())
 				.setScale(MONEY_SCALE, RoundingMode.HALF_UP);
 		return new ConvertedPriceResult(
 				converted,
 				targetCurrency,
-				price.getValue(),
-				price.getCurrency(),
+				original.value(),
+				original.currency(),
 				exchangeRate.rate(),
 				exchangeRate.date());
 	}
