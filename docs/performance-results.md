@@ -348,7 +348,7 @@ La prueba 'run-k6-load-test.sh' complementa esta carencia con un modelo controla
 
 En la rama integrada con JWT:
 
-- El benchmark original no es compatible porque no envía autenticación.
+- El benchmark original no es compatible porque envía autenticación, siempre y cuando después de aceptar una pequeña modificación, para que acepte autorización.
 - El benchmark modificado `run-k6-load-test.sh` permite ejecutar el escenario utilizando un token válido.
 
 Los bonus de Redis, JWT y conversión de moneda no modifican el benchmark oficial para favorecer artificialmente sus resultados.
