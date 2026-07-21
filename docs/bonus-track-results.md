@@ -77,8 +77,9 @@ por producto y fecha, aunque dos intervalos utilicen monedas distintas.
 
 ## Docker
 
-Compose contiene `postgres`, `redis`, `app` y `benchmark` bajo profile. La aplicación espera PostgreSQL
-y Redis saludables al arrancar, recibe las propiedades exchange y monta en modo read-only:
+Compose contiene `postgres`, `redis`, `app` y el servicio opcional `k6` bajo el profile
+`benchmark`. La aplicación espera PostgreSQL y Redis saludables al arrancar, recibe las propiedades
+exchange y monta en modo read-only:
 
 ~~~text
 ./config/jwt/generated/dev-public-key.pem
@@ -98,16 +99,16 @@ esquema.
 
 ## Benchmark
 
-El benchmark conserva el escenario original y exige un writer token:
+`performance/benchmark.sh` es el escenario oficial e inmutable. Ejecuta literalmente su setup y
+1.000/20.000/15.000 procesos curl en background; `performance/run-benchmark.sh` delega directamente
+en él. No contiene JWT, por lo que los resultados oficiales se midieron sobre la entrega base
+compatible y están separados en `docs/performance-results.md`.
 
-- setup funcional con un producto, tres precios EUR, tres fechas e historial;
-- 1.000 POST de producto con 100 VUs;
-- 20.000 GET de precio para `2024-04-15` con 500 VUs;
-- 15.000 GET de historial con 500 VUs.
-
-Las fases son secuenciales y usan `shared-iterations`. No hay conversiones, otras monedas, llamadas al
-proveedor ni fases nuevas. Redis está activo y todas las peticiones protegidas incluyen
-`Authorization: Bearer <ACCESS_TOKEN>`.
+`performance/products-load-test.js` es la carga k6 complementaria de esta rama. Conserva el setup,
+fechas y cantidades con 100/500/500 VUs y `shared-iterations`, pero añade instrumentación, checks,
+thresholds y el writer token. Redis está activo y las peticiones protegidas incluyen
+`Authorization: Bearer <ACCESS_TOKEN>`. No hay conversiones, otras monedas, llamadas al proveedor
+ni fases nuevas. Sus resultados no se presentan como si procedieran del Bash oficial.
 
 ## Tests
 
@@ -128,7 +129,8 @@ Resultados del estado integrado:
 - `CurrencyCode` se serializa como JSON mediante el mapper privado de Redis.
 - La conversión atraviesa un servicio de consulta cacheable separado para evitar auto-invocación.
 - JWT protege la conversión con el mismo scope `products.read`.
-- El benchmark continúa midiendo el contrato original en EUR.
+- El benchmark oficial y k6 continúan midiendo el contrato original en EUR; solo k6 añade validación
+  contractual y autenticación.
 - PostgreSQL sigue siendo la autoridad de vigencia y solapamiento.
 
 ## Limitaciones
@@ -162,9 +164,12 @@ reader_token="$(java tools/jwt/GenerateToken.java reader)"
 writer_token="$(java tools/jwt/GenerateToken.java writer)"
 ~~~
 
-Swagger está en `http://localhost:8080/swagger-ui/index.html`. Para el benchmark:
+Swagger está en `http://localhost:8080/swagger-ui/index.html`. Para la carga k6 opcional:
 
 ~~~bash
 export ACCESS_TOKEN="$(java tools/jwt/GenerateToken.java writer)"
-docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
+docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from k6
 ~~~
+
+El benchmark oficial se invoca con `bash performance/run-benchmark.sh` en una red compatible sin
+JWT; no se modifica para favorecer Redis, seguridad o conversión de moneda.

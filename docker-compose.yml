@@ -86,9 +86,9 @@ services:
           cpus: '0.5'
           memory: 512M
 
-  benchmark:
+  k6:
     image: grafana/k6:1.7.1
-    container_name: product-benchmark
+    container_name: product-k6-load-test
     profiles: ["benchmark"]
     depends_on:
       app:
@@ -101,8 +101,8 @@ services:
       ACCESS_TOKEN: ${ACCESS_TOKEN:-}
     volumes:
       - ./performance/products-load-test.js:/scripts/products-load-test.js:ro
-      - ./performance/run-benchmark.sh:/scripts/run-benchmark.sh:ro
-    entrypoint: ["/bin/sh", "/scripts/run-benchmark.sh"]
+      - ./performance/run-k6-load-test.sh:/scripts/run-k6-load-test.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/run-k6-load-test.sh"]
     deploy:
       resources:
         limits:
