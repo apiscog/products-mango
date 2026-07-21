@@ -1,178 +1,372 @@
-# Benchmark de rendimiento corregido
+# Performance validation
 
-## Objetivo
+Este documento recoge las pruebas de rendimiento realizadas sobre Products API y diferencia claramente entre:
 
-El benchmark conserva k6 como herramienta, pero reproduce exclusivamente las operaciones, datos,
-orden y cantidades de `benchmark.sh` incluido originalmente en el challenge:
+- El benchmark oficial proporcionado con el challenge.
+- La prueba de carga complementaria desarrollada con k6.
 
-```text
-k6 -> Products API -> PostgreSQL
+Ambas herramientas se mantienen separadas porque utilizan modelos de concurrencia distintos y, por tanto, sus resultados no son directamente comparables.
+
+## Benchmark oficial
+
+`performance/benchmark.sh` es el script original incluido en el challenge.
+
+El archivo se conserva sin modificaciones y define el escenario oficial de rendimiento. Su hash Git es:
+
+Para facilitar su ejecución se añadió `performance/run-benchmark.sh`.
+
+Este segundo script actúa únicamente como wrapper:
+
+- Localiza la raíz del repositorio.
+- Comprueba que las dependencias necesarias estén disponibles.
+- Ejecuta una sola vez el benchmark original mediante:
+
+```bash
+exec bash performance/benchmark.sh
 ```
 
-El Bash original lanzaba un proceso `curl` en segundo plano por petición. La traducción a k6 conserva
-el volumen funcional y la intención concurrente, sustituyendo los procesos del sistema por VUs
-controlables y contadores verificables. Estos resultados son una referencia local, no un SLA.
+El wrapper no contiene endpoints, fechas, cantidades ni lógica propia de carga. De esta forma, el escenario continúa definido en un único archivo.
 
-## Escenario reproducido
+## Escenario ejecutado
 
-### Preparación funcional
+El benchmark utiliza la URL fija:
 
-Una fase `setup` separada:
+```text
+http://product-api:8080
+```
 
-1. espera `GET /actuator/health` con respuesta `200` y `status=UP`;
-2. crea exactamente un producto `Zapatillas deportivas`;
-3. crea exactamente los precios `99.99` (enero-junio 2024), `129.99` (julio-diciembre 2024) y
-   `199.99` (desde enero 2025, sin final);
-4. consulta exactamente `2024-04-15`, `2024-08-15`, `2025-03-01` y el historial.
+El flujo que ejecuta es el siguiente:
 
-El identificador se extrae del JSON y se pasa a las fases de lectura. La preparación genera ocho
-peticiones funcionales más una petición de health cuando la aplicación ya está disponible. Sus
-métricas se etiquetan como `setup` y no se mezclan con los conteos de carga.
+1. Espera cinco segundos.
+2. Consulta `GET /actuator/health` cada cinco segundos hasta recibir estado `UP`.
+3. Crea un producto llamado `Zapatillas deportivas`.
+4. Extrae su identificador utilizando `grep`, `cut` y `tr`.
+5. Añade tres periodos de precio:
+    - 99,99 entre `2024-01-01` y `2024-06-30`.
+    - 129,99 entre `2024-07-01` y `2024-12-31`.
+    - 199,99 desde `2025-01-01`, sin fecha final.
+6. Consulta el precio vigente en:
+    - `2024-04-15`.
+    - `2024-08-15`.
+    - `2025-03-01`.
+7. Consulta el historial de precios.
+8. Ejecuta 1.000 peticiones `POST /products`.
+9. Ejecuta 20.000 consultas de precio para `2024-04-15`.
+10. Ejecuta 15.000 consultas de historial.
 
-### Fases de carga
+Las tres fases de carga se ejecutan de forma secuencial.
 
-Las fases se ejecutan secuencialmente mediante cuatro procesos k6 coordinados por
-`performance/run-benchmark.sh`:
+Dentro de cada fase, el script lanza un proceso `curl` en background por cada petición y espera a que terminen todos.
 
-| Orden | Fase | Operación | Cantidad exacta | VUs por defecto |
-|---:|---|---|---:|---:|
-| 1 | `product-creation` | `POST /products` | 1.000 | 100 |
-| 2 | `price-query` | `GET /products/{id}/prices?date=2024-04-15` | 20.000 | 500 |
-| 3 | `history-query` | `GET /products/{id}/prices` | 15.000 | 500 |
+No existe un límite equivalente a VUs. La concurrencia real depende de la capacidad del sistema operativo para crear y planificar miles de procesos.
 
-Cada fase usa `shared-iterations`: los VUs reparten trabajo concurrente, pero no cambian el total. No
-hay arrival rate, mezcla ponderada, fechas aleatorias ni altas de precios durante la carga. Los 1.000
-productos usan `<n>` de 1 a 1.000, son únicos dentro de la ejecución y no reciben precios. Repetirlos
-con un volumen conservado es válido porque el nombre de producto no tiene una restricción de unicidad.
+Las duraciones se calculan mediante:
+
+- `date +%s.%N`.
+- `bc`.
+
+Dependencias requeridas:
+
+- Bash.
+- curl.
+- grep.
+- cut.
+- tr.
+- date.
+- bc.
+- sleep.
+
+## Limitaciones del benchmark
+
+El benchmark reproduce exactamente el escenario entregado, pero tiene varias limitaciones que deben tenerse en cuenta al interpretar los resultados.
+
+El script:
+
+- No admite variables de entorno.
+- No permite cambiar la URL base.
+- No envía cabecera `Authorization`.
+- No configura timeout para `curl`.
+- No valida de forma general los códigos HTTP.
+- No comprueba el contrato JSON de las respuestas.
+- Solo verifica que puede extraer el ID del producto inicial.
+
+Por tanto, un exit code `0` confirma que el script finalizó, pero no garantiza que todas las peticiones hayan devuelto una respuesta funcional correcta.
+
+Además, `curl` no considera por defecto una respuesta HTTP 4xx o 5xx como error de proceso. Sin opciones adicionales, una respuesta de este tipo puede producir igualmente exit code `0`.
 
 ## Ejecución
 
-```powershell
-docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
+En un entorno donde el hostname `product-api` resuelva correctamente:
+
+```bash
+bash performance/run-benchmark.sh
 ```
 
-Variables configurables:
+La URL fija indica que el script fue diseñado para ejecutarse dentro de una red de contenedores.
 
-| Variable | Predeterminado | Efecto |
-|---|---:|---|
-| `BASE_URL` | `http://app:8080` | API dentro de la red Compose |
-| `PRODUCT_CREATION_VUS` | `100` | concurrencia de las 1.000 altas |
-| `PRICE_QUERY_VUS` | `500` | concurrencia de las 20.000 consultas de precio |
-| `HISTORY_QUERY_VUS` | `500` | concurrencia de los 15.000 historiales |
+Para lanzarlo directamente desde el host sería necesario que `product-api` pudiera resolverse. El wrapper no modifica el hostname ni altera el archivo original.
 
-Ejemplo PowerShell, sin alterar las cantidades:
+## Compatibilidad con la rama integrada
 
-```powershell
-$env:PRICE_QUERY_VUS='250'; $env:HISTORY_QUERY_VUS='250'; docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
-```
+La rama `master`, incluye seguridad JWT y exige un Bearer token en los endpoints de producto.
 
-Cada ejecución añade datos. La limpieza completa es opcional y explícita:
+El benchmark oficial no envía la cabecera `Authorization`, por lo que no puede ejecutarse contra esta versión sin cambiar el escenario original.
 
-```powershell
-docker compose --profile benchmark down -v
-```
+Para mantener la compatibilidad, las mediciones oficiales se realizaron sobre la entrega base sin JWT:
 
-## Validaciones y métricas
+La prueba se ejecutó en un proyecto Docker Compose temporal y aislado.
 
-Cada petición valida el status esperado, Content-Type JSON, JSON legible, contrato mínimo y ausencia
-de 5xx. Los contadores `product_creation_requests`, `price_query_requests` y
-`history_query_requests` tienen thresholds exactos de 1.000, 20.000 y 15.000.
-
-Thresholds funcionales:
-
-- cero códigos inesperados;
-- cero errores 5xx;
-- cero contratos inválidos;
-- cero iteraciones descartadas;
-- más del 99% de checks y éxito de negocio;
-- menos del 1% de `http_req_failed` en cada fase de carga.
-
-No se fija un límite de latencia como requisito del challenge. k6 muestra por separado duración,
-throughput, avg, mediana, p90, p95, p99 y máximo para cada fase.
+El mismo archivo `performance/benchmark.sh`, con el hash indicado anteriormente, se montó en modo read-only dentro del runner.
 
 ## Entorno de referencia
 
-- Fecha: 2026-07-19.
-- Host: Windows 10 Home 64-bit, versión 10.0.19045.
-- Docker Desktop: engine 29.6.1, Linux x86_64.
-- Recursos visibles a Docker: 12 CPUs y aproximadamente 7,32 GiB.
-- Límites Compose: API 1 CPU/1 GiB, PostgreSQL 0,5 CPU/1 GiB, k6 1 CPU/1 GiB.
-- Imágenes: `postgres:17-alpine` (PostgreSQL 17.10) y `grafana/k6:1.7.1`.
-- Concurrencia: 100/500/500 VUs.
+Las mediciones se realizaron con el siguiente entorno:
 
-## Resultados
+- Fecha: 2026-07-21.
+- Sistema operativo: Windows 10 `10.0.19045` x64.
+- Java: 21.0.2.
+- Docker Desktop: 4.82.0.
+- Docker Engine: 29.6.1.
+- Entorno Docker: Linux x86_64.
+- CPU visibles para Docker: 12 CPU lógicas.
+- Memoria visible para Docker: 7,32 GiB.
+- Límite de la API: 1 CPU y 1 GiB.
+- Límite de PostgreSQL: 0,5 CPU y 1 GiB.
+- PostgreSQL: `postgres:17-alpine`.
+- Tiempo aproximado hasta healthcheck: 16,9 segundos.
+
+## Resultados oficiales
+
+Se realizaron dos ejecuciones consecutivas.
+
+La primera comenzó con un volumen limpio. La segunda reutilizó el volumen y, por tanto, mantuvo los datos, procesos calentados y parte de las cachés del sistema.
 
 ### Ejecución 1: volumen limpio
 
-| Fase | Requests | Duración pared | Throughput | Errores | Checks |
-|---|---:|---:|---:|---:|---:|
-| Product creation | 1.000 | 3 s | 379,65 req/s | 0% | 5.000/5.000 |
-| Price query | 20.000 | 18 s | 1.118,97 req/s | 0% | 100.000/100.000 |
-| History query | 15.000 | 16 s | 949,08 req/s | 0% | 75.000/75.000 |
+| Fase | Peticiones | Tiempo | Throughput calculado |
+|---|---:|---:|---:|
+| Creación de productos | 1.000 | 6,987 s | 143,12 req/s |
+| Consulta de precio vigente | 20.000 | 83,377 s | 239,87 req/s |
+| Consulta de historial | 15.000 | 787,533 s | 19,05 req/s |
 
-| Fase | avg | mediana | p90 | p95 | p99 | máximo |
-|---|---:|---:|---:|---:|---:|---:|
-| Product creation | 248,21 ms | 208,97 ms | 405,92 ms | 498,26 ms | 692,19 ms | 998,40 ms |
-| Price query | 435,51 ms | 299,40 ms | 864,28 ms | 1,10 s | 1,69 s | 4,29 s |
-| History query | 513,90 ms | 400,62 ms | 907,46 ms | 1,12 s | 1,62 s | 2,99 s |
+Resumen:
 
-- Setup: 8 peticiones funcionales + 1 health; 44/44 checks.
-- Carga total exacta: 36.000 peticiones.
-- Duración total aproximada: 38 segundos.
-- Códigos inesperados, 5xx e iteraciones descartadas: 0.
-- Exit code: 0.
+- Tiempo total de las fases medidas: 877,897 segundos.
+- ID del producto de preparación: `1`.
+- Exit code del script: `0`.
+- Errores `curl: (n)` detectados: `0`.
+- Errores de creación de procesos detectados: `0`.
 
-Muestras puntuales durante las lecturas:
+Picos de recursos observados:
 
-| Fase | API CPU/memoria | PostgreSQL CPU/memoria | k6 CPU/memoria |
-|---|---|---|---|
-| Product creation | 100,86% / 336,70 MiB | 8,81% / 76,84 MiB | 13,19% / 50,96 MiB |
-| Price query | 104,45% / 365,40 MiB | 10,86% / 80,53 MiB | 13,70% / 179,40 MiB |
-| History query | 103,32% / 422,00 MiB | 19,27% / 83,05 MiB | 25,94% / 197,20 MiB |
+| Servicio | CPU máxima observada | Memoria máxima observada |
+|---|---:|---:|
+| API | 118,74% | 526 MiB |
+| PostgreSQL | 30,93% | 85,21 MiB |
+| Runner | 1.123,50% | 6,05 GiB |
+
+El runner quedó claramente saturado.
+
+Esto es relevante porque el resultado no mide únicamente el rendimiento de la API. También está condicionado por el coste de crear y mantener miles de procesos `curl` en paralelo.
 
 ### Ejecución 2: volumen conservado
 
-El setup recuperó un nuevo ID (`1002`), demostrando repetibilidad sin limpiar PostgreSQL.
+| Fase | Peticiones | Tiempo | Throughput calculado |
+|---|---:|---:|---:|
+| Creación de productos | 1.000 | 2,002 s | 499,52 req/s |
+| Consulta de precio vigente | 20.000 | 22,070 s | 906,19 req/s |
+| Consulta de historial | 15.000 | 19,270 s | 778,42 req/s |
 
-| Fase | Requests | Duración pared | Throughput | Errores | Checks |
-|---|---:|---:|---:|---:|---:|
-| Product creation | 1.000 | 3 s | 396,92 req/s | 0% | 5.000/5.000 |
-| Price query | 20.000 | 19 s | 1.081,80 req/s | 0% | 100.000/100.000 |
-| History query | 15.000 | 16 s | 914,83 req/s | 0% | 75.000/75.000 |
+Resumen:
 
-| Fase | avg | mediana | p90 | p95 | p99 | máximo |
-|---|---:|---:|---:|---:|---:|---:|
-| Product creation | 236,07 ms | 205,70 ms | 404,61 ms | 498,65 ms | 699,43 ms | 1,00 s |
-| Price query | 451,07 ms | 301,54 ms | 895,46 ms | 1,10 s | 1,80 s | 4,19 s |
-| History query | 532,19 ms | 406,39 ms | 986,42 ms | 1,20 s | 1,70 s | 3,90 s |
+- Tiempo total de las fases medidas: 43,342 segundos.
+- ID del nuevo producto de preparación: `1002`.
+- Exit code del script: `0`.
+- Errores `curl: (n)` detectados: `0`.
+- Errores de creación de procesos detectados: `0`.
 
-- Setup: 8 peticiones funcionales + 1 health; 44/44 checks.
-- Carga total exacta: 36.000 peticiones.
-- Duración total aproximada: 39 segundos.
-- Códigos inesperados, 5xx e iteraciones descartadas: 0.
-- Exit code: 0.
+Muestras puntuales de recursos:
 
-Muestras puntuales:
+| Servicio | CPU máxima observada | Memoria máxima observada |
+|---|---:|---:|
+| API | 100,93% | 535,1 MiB |
+| PostgreSQL | 26,87% | 47,49 MiB |
+| Runner | 970,28% | 402,8 MiB |
 
-| Fase | API CPU/memoria | PostgreSQL CPU/memoria | k6 CPU/memoria |
-|---|---|---|---|
-| Product creation | 100,06% / 280,90 MiB | 9,30% / 39,35 MiB | 27,13% / 76,25 MiB |
-| Price query | 104,06% / 339,00 MiB | 11,08% / 43,57 MiB | 14,39% / 146,10 MiB |
-| History query | 101,20% / 377,70 MiB | 15,80% / 45,09 MiB | 26,79% / 175,20 MiB |
+El muestreo se realizó cada 30 segundos, por lo que el valor de memoria del runner puede no representar el pico real.
 
-## Análisis
+## Validación de los datos generados
 
-Las dos ejecuciones reprodujeron exactamente las cantidades originales y fueron repetibles sobre un
-volumen persistente. Los 500 VUs de lectura mantienen ocupada aproximadamente una CPU completa de la
-API, coherente con el límite Compose, pero no provocaron errores, descartes ni respuestas inválidas.
-No se modificó producción ni se aplicó ninguna optimización.
+Después de las dos ejecuciones, PostgreSQL contenía:
 
-## Limitaciones
+- 2.002 productos.
+- 6 precios.
 
-- Es una prueba local corta, no un soak test ni una estimación universal de capacidad.
-- `docker stats` son muestras puntuales y pueden superar ligeramente 100% por el intervalo de muestreo.
-- `shared-iterations` conserva el volumen y concurrencia de forma reproducible, pero no intenta iniciar
-  literalmente miles de procesos a la vez como el bucle Bash.
-- La duración de pared del orquestador se mide con resolución de un segundo; k6 ofrece las tasas y
-  latencias precisas por fase.
-- Los resultados dependen del hardware, Docker Desktop y carga local.
+El resultado es coherente con las escrituras esperadas:
+
+- Un producto inicial por ejecución.
+- 1.000 productos adicionales por ejecución.
+- Tres precios para cada producto inicial.
+
+No es posible publicar una cifra fiable de errores HTTP para las consultas de lectura porque el benchmark no registra los status code.
+
+Durante la primera ejecución también aparecieron warnings JDBC en la aplicación mientras el entorno estaba saturado.
+
+Este punto refuerza que el exit code `0` no debe interpretarse como una validación funcional completa.
+
+## Interpretación de los resultados
+
+La diferencia entre ambas ejecuciones es muy alta:
+
+- Primera ejecución: 877,897 segundos.
+- Segunda ejecución: 43,342 segundos.
+
+La suma de fases fue aproximadamente veinte veces menor en la segunda prueba.
+
+Esta variación indica que el benchmark es especialmente sensible a:
+
+- Creación y planificación de procesos.
+- Presión de memoria.
+- Estado de la JVM.
+- Cachés del sistema operativo.
+- Estado de PostgreSQL.
+- Carga general del equipo.
+- Condiciones del entorno Docker Desktop.
+
+Por este motivo, estos resultados deben entenderse como mediciones locales de referencia, no como un SLA ni como una capacidad estable del sistema.
+
+Tampoco sería correcto atribuir toda la diferencia a una mejora de la API, ya que el propio generador de carga forma parte importante del cuello de botella.
+
+## Prueba complementaria con k6
+
+`performance/products-load-test.js` implementa una prueba de carga adicional mediante Grafana k6.
+
+Su objetivo no es sustituir el benchmark oficial, sino aportar una ejecución más controlada y con mayor observabilidad.
+
+`performance/run-k6-load-test.sh` se encarga de preparar el entorno y coordinar las fases.
+
+La prueba mantiene:
+
+- Los mismos datos principales.
+- Las mismas fechas.
+- Las cantidades de 1.000, 20.000 y 15.000 operaciones.
+
+Sin embargo, su metodología es diferente.
+
+### Diferencias respecto al benchmark oficial
+
+k6 utiliza `shared-iterations` y un número controlado de VUs:
+
+- 100 VUs para creación de productos.
+- 500 VUs para precio vigente.
+- 500 VUs para historial.
+
+Además:
+
+- Valida status HTTP.
+- Valida `Content-Type`.
+- Comprueba que la respuesta sea JSON.
+- Comprueba partes del contrato funcional.
+- Exige las cantidades esperadas.
+- Detecta status inesperados.
+- Registra errores 5xx.
+- Detecta iteraciones descartadas.
+- Publica media, mediana, p90, p95, p99 y máximo.
+- Publica checks y throughput.
+- Admite `ACCESS_TOKEN`.
+- Puede ejecutarse contra la rama integrada con JWT.
+- Comprueba el contrato multidivisa y espera `EUR`.
+- Utiliza la aplicación integrada con Redis.
+
+## Ejecución de k6
+
+Linux o macOS:
+
+```bash
+export ACCESS_TOKEN="$(java tools/jwt/GenerateToken.java writer)"
+
+docker compose --profile benchmark up \
+  --build \
+  --abort-on-container-exit \
+  --exit-code-from k6
+```
+
+PowerShell:
+
+```powershell
+$env:ACCESS_TOKEN = java tools/jwt/GenerateToken.java writer
+
+docker compose --profile benchmark up `
+  --build `
+  --abort-on-container-exit `
+  --exit-code-from k6
+```
+
+## Resultados históricos de k6
+
+Los siguientes resultados corresponden a una medición realizada el 2026-07-19.
+
+Son anteriores a la decisión de presentar el Bash como benchmark oficial y se conservan como referencia de la prueba complementaria.
+
+| Ejecución | Fase | Throughput | p50 | p95 | p99 | Errores |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | Creación | 379,65 req/s | 208,97 ms | 498,26 ms | 692,19 ms | 0% |
+| 1 | Precio vigente | 1.118,97 req/s | 299,40 ms | 1,10 s | 1,69 s | 0% |
+| 1 | Historial | 949,08 req/s | 400,62 ms | 1,12 s | 1,62 s | 0% |
+| 2 | Creación | 396,92 req/s | 205,70 ms | 498,65 ms | 699,43 ms | 0% |
+| 2 | Precio vigente | 1.081,80 req/s | 301,54 ms | 1,10 s | 1,80 s | 0% |
+| 2 | Historial | 914,83 req/s | 406,39 ms | 1,20 s | 1,70 s | 0% |
+
+En las dos ejecuciones:
+
+- No se registraron errores funcionales.
+- No se registraron respuestas 5xx.
+- Las cantidades de operaciones fueron las esperadas.
+- No se descartaron iteraciones.
+
+Estas cifras pertenecen al modelo de concurrencia controlado de k6.
+
+No representan percentiles del benchmark Bash y no deben compararse directamente con sus tiempos sin explicar previamente la diferencia metodológica.
+
+## Conclusiones
+
+El benchmark oficial se conserva exactamente como fue entregado y sigue siendo la referencia para reproducir el escenario del challenge.
+
+Su principal ventaja es la fidelidad al script original. Su principal limitación es que utiliza una concurrencia basada en procesos `curl` sin control y no valida de forma completa las respuestas HTTP.
+
+El wrapper evita duplicar la definición del escenario y propaga directamente el resultado del script original.
+
+Los tiempos obtenidos permiten calcular throughput mediante:
+
+```text
+throughput = número de peticiones / tiempo en segundos
+```
+
+Sin embargo, el Bash no permite obtener percentiles, tasas de error HTTP fiables ni métricas de latencia por petición.
+
+La prueba 'run-k6-load-test.sh' complementa esta carencia con un modelo controlado, validaciones funcionales y métricas más útiles para analizar el comportamiento de la API.
+
+En la rama integrada con JWT:
+
+- El benchmark original no es compatible porque no envía autenticación.
+- El benchmark modificado `run-k6-load-test.sh` permite ejecutar el escenario utilizando un token válido.
+
+Los bonus de Redis, JWT y conversión de moneda no modifican el benchmark oficial para favorecer artificialmente sus resultados.
+
+## Reproducibilidad
+
+Cada ejecución añade datos al volumen de PostgreSQL.
+
+Para repetir una prueba conservando el estado:
+
+```bash
+docker compose down
+```
+
+Para eliminar los datos y volver a un entorno limpio:
+
+```bash
+docker compose down -v
+```
+
+Las comparaciones deben indicar siempre si se parte de un volumen limpio o conservado, ya que esta condición tuvo un impacto importante en los resultados observados.
