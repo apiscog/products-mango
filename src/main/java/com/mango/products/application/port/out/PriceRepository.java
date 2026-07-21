@@ -1,6 +1,5 @@
 package com.mango.products.application.port.out;
 
-import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
@@ -13,7 +12,7 @@ public interface PriceRepository {
 
 	boolean overlaps(long productId, LocalDate initDate, LocalDate endDate);
 
-	Optional<BigDecimal> findValueAtDate(long productId, LocalDate date);
+	Optional<Price> findAtDate(long productId, LocalDate date);
 
 	/**
 	 * Returns prices ordered by init date ascending and id ascending.

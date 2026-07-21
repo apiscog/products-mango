@@ -1,0 +1,4 @@
+.git/
+target/
+tools/jwt/generated/
+config/jwt/generated/

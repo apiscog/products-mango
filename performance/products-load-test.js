@@ -5,6 +5,7 @@ import { Counter, Rate, Trend } from 'k6/metrics';
 
 const BASE_URL = __ENV.BASE_URL || 'http://app:8080';
 const MODE = __ENV.MODE || 'setup';
+const ACCESS_TOKEN = __ENV.ACCESS_TOKEN || '';
 
 const PRODUCT_CREATION_ITERATIONS = 1000;
 const PRICE_QUERY_ITERATIONS = 20000;
@@ -60,6 +61,7 @@ export function setupFlow() {
         const body = parseJson(response);
         const valid = body !== null
             && body.value === price.value
+            && body.currency === 'EUR'
             && body.initDate === price.initDate
             && Object.prototype.hasOwnProperty.call(body, 'endDate')
             && body.endDate === price.endDate;
@@ -79,8 +81,9 @@ export function setupFlow() {
         setup_business_requests.add(1, { phase: 'setup' });
         const body = parseJson(response);
         const valid = body !== null
-            && exactFields(body, ['value'])
-            && body.value === expectedPrices[index];
+            && exactFields(body, ['value', 'currency'])
+            && body.value === expectedPrices[index]
+            && body.currency === 'EUR';
         validateResponse(response, 200, valid, 'setup', `setup price query ${date}`);
         requireSetup(valid && response.status === 200,
             `setup price query failed for ${date}: ${response.body}`);
@@ -131,7 +134,10 @@ export function queryPrice() {
     price_query_requests.add(1, { phase: 'price-query' });
     price_query_duration.add(response.timings.duration, { phase: 'price-query' });
     const body = parseJson(response);
-    const valid = body !== null && exactFields(body, ['value']) && body.value === 99.99;
+    const valid = body !== null
+        && exactFields(body, ['value', 'currency'])
+        && body.value === 99.99
+        && body.currency === 'EUR';
     validateResponse(response, 200, valid, 'price-query', 'price query');
 }
 
@@ -206,8 +212,9 @@ function matchesExpectedHistory(body) {
         || body.prices.length !== SETUP_PRICES.length) {
         return false;
     }
-    return body.prices.every((price, index) => exactFields(price, ['value', 'initDate', 'endDate'])
+    return body.prices.every((price, index) => exactFields(price, ['value', 'currency', 'initDate', 'endDate'])
         && price.value === SETUP_PRICES[index].value
+        && price.currency === 'EUR'
         && price.initDate === SETUP_PRICES[index].initDate
         && price.endDate === SETUP_PRICES[index].endDate);
 }
@@ -327,12 +334,18 @@ function exactFields(body, expectedFields) {
 }
 
 function request(name, phase) {
-    return { tags: { name, phase } };
+    return {
+        headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+        tags: { name, phase },
+    };
 }
 
 function jsonRequest(name, phase) {
     return {
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+            Authorization: `Bearer ${ACCESS_TOKEN}`,
+            'Content-Type': 'application/json',
+        },
         tags: { name, phase },
     };
 }

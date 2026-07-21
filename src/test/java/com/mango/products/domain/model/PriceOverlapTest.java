@@ -85,14 +85,19 @@ class PriceOverlapTest {
 
 	@Test
 	void overlapComparisonOnlyUsesTemporalSemantics() {
-		Price firstProduct = price(1L, date(2024, 1, 1), date(2024, 6, 30));
-		Price secondProduct = price(2L, date(2024, 6, 30), date(2024, 12, 31));
+		Price firstProduct = price(1L, CurrencyCode.EUR, date(2024, 1, 1), date(2024, 6, 30));
+		Price secondProduct = price(2L, CurrencyCode.USD, date(2024, 6, 30), date(2024, 12, 31));
 
 		assertTrue(firstProduct.overlaps(secondProduct));
 	}
 
 	private static Price price(Long productId, LocalDate initDate, LocalDate endDate) {
-		return Price.create(productId, new BigDecimal("10.00"), initDate, endDate);
+		return price(productId, CurrencyCode.EUR, initDate, endDate);
+	}
+
+	private static Price price(
+			Long productId, CurrencyCode currency, LocalDate initDate, LocalDate endDate) {
+		return Price.create(productId, new BigDecimal("10.00"), currency, initDate, endDate);
 	}
 
 	private static LocalDate date(int year, int month, int day) {

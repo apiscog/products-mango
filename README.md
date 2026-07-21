@@ -38,18 +38,22 @@ Por ejemplo, `[2024-01-01, 2024-06-30]` se solapa con
 - Docker y Docker Compose.
 - Grafana k6 1.7.1.
 
+> `master` contiene la entrega base. Las ramas `feature/exchange-currency`,
+> `feature/redis-cache` y `feature/jwt-security` conservan bonus independientes.
+> `feature/bonus-track` integra deliberadamente los tres.
+
 ## Arquitectura
 
 Se aplica una arquitectura hexagonal ligera dentro de una única aplicación modular:
 
 ```mermaid
 flowchart LR
-    Client[Cliente] --> Web[REST Controller]
+    Client[Cliente] --> Security[JWT Security]
+    Security --> Web[REST Controller]
     Web --> Port[ProductUseCases]
-    Port --> Service[ProductApplicationService]
-    Service --> Repositories[Repository ports]
-    Repositories --> Adapters[PostgreSQL adapters]
-    Adapters --> Database[(PostgreSQL)]
+    Port --> Cache[(Redis)]
+    Port --> Database[(PostgreSQL)]
+    Port --> Exchange[ExchangeRateProvider]
 ```
 
 - `domain` contiene Java puro y no depende de Spring, JPA ni HTTP.
@@ -80,20 +84,22 @@ La base de datos es la autoridad definitiva de esta invariante.
 
 ## Requisitos previos
 
-Para el flujo recomendado solo se necesita Docker con Docker Compose v2 y los puertos locales `8080`
-y `5432` disponibles. Java y PostgreSQL locales no son necesarios cuando se utiliza Docker Compose.
+Para el flujo recomendado se necesita Docker con Docker Compose v2, Java 21 para generar las claves
+locales y los puertos `8080`, `5432` y `6379` disponibles. PostgreSQL y Redis locales no son necesarios.
 
 ## Inicio rápido con Docker Compose
 
 ```bash
 git clone https://github.com/apiscog/products-mango.git
 cd products-mango
-docker compose up -d --build postgres app
+java tools/jwt/GenerateDevKeys.java
+docker compose up -d --build postgres redis app
 docker compose ps
 ```
 
-Compose levanta PostgreSQL 17, espera a que esté saludable y después inicia la API. Flyway crea el
-esquema automáticamente. La aplicación se empaqueta con Maven en una imagen propia multi-stage.
+Compose levanta PostgreSQL 17 y Redis 7.4.9, espera a que ambos estén saludables y después inicia la
+API. Flyway crea el esquema automáticamente. La aplicación se empaqueta con Maven en una imagen
+propia multi-stage.
 
 | Servicio | Dirección |
 |---|---|
@@ -102,6 +108,7 @@ esquema automáticamente. La aplicación se empaqueta con Maven en una imagen pr
 | Swagger UI | <http://localhost:8080/swagger-ui/index.html> |
 | OpenAPI JSON | <http://localhost:8080/v3/api-docs> |
 | PostgreSQL | `localhost:5432` |
+| Redis | `localhost:6379` |
 
 PostgreSQL utiliza un volumen persistente. Para detener los servicios conservando los datos:
 
@@ -114,6 +121,116 @@ Para eliminar también los datos locales:
 ```bash
 docker compose down -v
 ```
+
+## Bonus de seguridad JWT integrado
+
+La integración incorpora Spring Security OAuth2 Resource Server. **master** conserva la entrega base
+sin autenticación. Products API valida Bearer tokens RS256 y scopes antes de llegar al
+controlador; no emite tokens, no gestiona usuarios o contrasenas y no es un Authorization Server.
+
+~~~text
+Cliente -> Spring Security / JWT -> Products API -> PostgreSQL
+~~~
+
+| Acceso | Regla |
+|---|---|
+| Publico | GET health, OpenAPI y Swagger UI |
+| Lectura | scope products.read para GET /products/** |
+| Escritura | scope products.write para POST /products/** |
+
+El claim JWT scope se convierte en SCOPE_products.read o SCOPE_products.write. El writer de
+demostracion incluye ambos scopes; write no implica read de forma automatica. La API es stateless,
+no crea JSESSIONID y devuelve JSON 401 para token ausente/invalido y 403 para scope insuficiente.
+
+Cada clon genera su propio par RSA local, **solo para desarrollo y no reutilizable en produccion**:
+
+~~~text
+GenerateDevKeys.java
+|- genera tools/jwt/generated/dev-private-key.pem
++- genera config/jwt/generated/dev-public-key.pem
+
+GenerateToken.java -> usa la privada para firmar
+Products API       -> usa la publica para validar
+~~~
+
+Desde la raiz, antes de arrancar la aplicacion:
+
+~~~bash
+java tools/jwt/GenerateDevKeys.java
+docker compose up -d --build postgres redis app
+~~~
+
+La utilidad intenta aplicar permisos de lectura/escritura solo para el propietario a la privada en
+sistemas POSIX. En Windows avisa si ese modo no está disponible, pero genera el par correctamente.
+
+En PowerShell, genera y copia los tokens:
+
+~~~powershell
+$writerToken = java tools/jwt/GenerateToken.java writer
+$writerToken | Set-Clipboard
+$readerToken = java tools/jwt/GenerateToken.java reader
+$readerToken | Set-Clipboard
+~~~
+
+En macOS o Linux:
+
+~~~bash
+writer_token="$(java tools/jwt/GenerateToken.java writer)"
+reader_token="$(java tools/jwt/GenerateToken.java reader)"
+printf '%s\n' "$writer_token"
+# macOS:
+printf %s "$writer_token" | pbcopy
+~~~
+
+Los tokens incluyen issuer products-challenge-dev, audience products-api, expiracion aproximada de
+15 minutos y los scopes reader o writer. El generador imprime solo el token solicitado y no lo
+guarda. En Swagger UI pulsa **Authorize** y pega solo el JWT: el esquema HTTP Bearer anade el prefijo.
+
+Ejemplos minimos:
+
+~~~bash
+curl -H "Authorization: Bearer $reader_token" \
+  'http://localhost:8080/products/1/prices?date=2024-04-15'
+
+curl -X POST http://localhost:8080/products \
+  -H "Authorization: Bearer $writer_token" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Zapatillas deportivas","description":"Modelo 2025 edicion limitada"}'
+~~~
+
+Configuracion externalizable:
+
+| Variable | Desarrollo |
+|---|---|
+| JWT_PUBLIC_KEY_LOCATION | file:./config/jwt/generated/dev-public-key.pem |
+| JWT_ISSUER | products-challenge-dev |
+| JWT_AUDIENCE | products-api |
+| JWT_PRIVATE_KEY_LOCATION | tools/jwt/generated/dev-private-key.pem (solo generador) |
+| JWT_TOKEN_TTL_SECONDS | 900 (solo generador, maximo 3600) |
+
+En produccion debe montarse una clave publica externa, por ejemplo
+file:/run/secrets/products-public-key.pem, usar HTTPS y delegar emision, custodia de clave privada,
+rotacion y revocacion en un proveedor de identidad. No debe copiarse la clave privada al contenedor.
+Los detalles de pruebas y coste medido estan en
+[docs/jwt-security-results.md](docs/jwt-security-results.md).
+
+### Solución de problemas de claves
+
+Si falta la clave pública o la privada, ejecuta desde la raíz:
+
+~~~bash
+java tools/jwt/GenerateDevKeys.java
+~~~
+
+Si solo existe una de las dos, el par está incompleto y la utilidad falla sin modificar el archivo
+restante. Elimina conscientemente ambos archivos o regenera el par completo:
+
+~~~bash
+java tools/jwt/GenerateDevKeys.java --force
+~~~
+
+La opción **--force** sustituye ambas claves como una unidad. Los tokens emitidos con el par anterior
+dejan de ser válidos porque Products API pasa a verificar con una clave pública nueva.
 
 ## API y ejemplos
 
@@ -131,6 +248,7 @@ recomienda `Invoke-RestMethod` con un body generado mediante `ConvertTo-Json`.
 
 ```bash
 curl -i -X POST http://localhost:8080/products \
+  -H "Authorization: Bearer $writer_token" \
   -H 'Content-Type: application/json' \
   -d '{"name":"Zapatillas deportivas","description":"Modelo 2025 edición limitada"}'
 ```
@@ -149,6 +267,7 @@ Respuesta `201 Created`, con la cabecera `Location: /products/1`:
 
 ```bash
 curl -i -X POST http://localhost:8080/products/1/prices \
+  -H "Authorization: Bearer $writer_token" \
   -H 'Content-Type: application/json' \
   -d '{"value":99.99,"initDate":"2024-01-01","endDate":"2024-06-30"}'
 ```
@@ -158,6 +277,7 @@ Respuesta `201 Created`:
 ```json
 {
   "value": 99.99,
+  "currency": "EUR",
   "initDate": "2024-01-01",
   "endDate": "2024-06-30"
 }
@@ -167,6 +287,7 @@ Un precio indefinido se crea con `"endDate": null`:
 
 ```bash
 curl -i -X POST http://localhost:8080/products/1/prices \
+  -H "Authorization: Bearer $writer_token" \
   -H 'Content-Type: application/json' \
   -d '{"value":129.99,"initDate":"2024-07-01","endDate":null}'
 ```
@@ -174,21 +295,23 @@ curl -i -X POST http://localhost:8080/products/1/prices \
 ### Consultar el precio vigente
 
 ```bash
-curl 'http://localhost:8080/products/1/prices?date=2024-04-15'
+curl -H "Authorization: Bearer $reader_token" \
+  'http://localhost:8080/products/1/prices?date=2024-04-15'
 ```
 
 Respuesta `200 OK`:
 
 ```json
 {
-  "value": 99.99
+  "value": 99.99,
+  "currency": "EUR"
 }
 ```
 
 ### Consultar el historial
 
 ```bash
-curl http://localhost:8080/products/1/prices
+curl -H "Authorization: Bearer $reader_token" http://localhost:8080/products/1/prices
 ```
 
 Respuesta `200 OK`:
@@ -200,11 +323,13 @@ Respuesta `200 OK`:
   "prices": [
     {
       "value": 99.99,
+      "currency": "EUR",
       "initDate": "2024-01-01",
       "endDate": "2024-06-30"
     },
     {
       "value": 129.99,
+      "currency": "EUR",
       "initDate": "2024-07-01",
       "endDate": null
     }
@@ -237,6 +362,10 @@ Todos los errores controlados siguen esta estructura:
 | 404 | `PRICE_NOT_FOUND` | El producto existe, pero no tiene precio para la fecha |
 | 409 | `PRICE_OVERLAP` | El periodo se solapa con otro precio del producto |
 | 500 | `INTERNAL_ERROR` | Error inesperado, sin detalles internos en la respuesta |
+
+La capa de seguridad usa el mismo envelope: 401 UNAUTHORIZED para token ausente o inválido y
+403 FORBIDDEN para un JWT válido sin el scope requerido. Nunca incluye el token, claves, stack trace
+o detalles criptográficos.
 
 Un error de validación añade los campos afectados:
 
@@ -275,6 +404,10 @@ Linux/macOS: `./mvnw spring-boot:run`
 Flyway se ejecuta al arrancar. Docker Compose sigue siendo la opción recomendada para evaluar la
 entrega porque fija la versión de PostgreSQL y evita dependencias externas como Neon.
 
+La seguridad usa además JWT_PUBLIC_KEY_LOCATION (file:./config/jwt/generated/dev-public-key.pem),
+JWT_ISSUER (products-challenge-dev) y JWT_AUDIENCE (products-api). Estos valores pueden
+externalizarse sin cambiar el artefacto.
+
 ## Tests
 
 ### Tests rápidos
@@ -296,22 +429,23 @@ Además de los tests rápidos, Failsafe ejecuta los tests `*IT` con PostgreSQL r
 Testcontainers: migración Flyway, adaptadores de persistencia, restricción de exclusión, concurrencia
 y peticiones HTTP end-to-end en un puerto aleatorio. No se utiliza H2 ni Docker Compose en estos tests.
 
-Totales actuales:
+Totales actuales de esta rama:
 
-- 80 tests rápidos.
-- 22 tests de persistencia PostgreSQL.
-- 16 ejecuciones end-to-end HTTP.
-- 118 tests en total.
+- 124 tests rápidos, incluidos seguridad WebMvc, caché, exchange y generación local de claves.
+- 63 ejecuciones de integración con PostgreSQL, Redis, JWT real y Flyway.
+- 187 ejecuciones en total.
 
 Estos totales son una referencia y pueden crecer con la suite.
 
 ## Benchmark de rendimiento
 
-El benchmark mide `k6 -> Products API -> PostgreSQL` y reproduce el escenario de `benchmark.sh`
-proporcionado con el challenge. Utiliza `grafana/k6:1.7.1`, no requiere instalar k6 localmente y
-permanece bajo el profile `benchmark`.
+El benchmark reproduce el escenario de `benchmark.sh` proporcionado con el challenge. En esta rama
+integrada mide `k6 -> Spring Security/JWT -> Products API -> Redis / PostgreSQL`, manteniendo
+exactamente el escenario, cantidades, VUs, fechas, orden y thresholds de `master`. Utiliza
+`grafana/k6:1.7.1`, no requiere instalar k6 localmente y permanece bajo el profile `benchmark`.
 
 ```bash
+export ACCESS_TOKEN="$(java tools/jwt/GenerateToken.java writer)"
 docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
 ```
 
@@ -335,7 +469,15 @@ durante la carga. Variables configurables:
 | `PRICE_QUERY_VUS` | `500` |
 | `HISTORY_QUERY_VUS` | `500` |
 
-Ejemplo PowerShell:
+ACCESS_TOKEN es obligatorio y run-benchmark.sh falla antes del setup si falta. El token no se
+imprime ni se guarda. En PowerShell:
+
+~~~powershell
+$env:ACCESS_TOKEN = java tools/jwt/GenerateToken.java writer
+docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
+~~~
+
+Ejemplo PowerShell para reducir solo la concurrencia:
 
 ```powershell
 $env:PRICE_QUERY_VUS='250'; $env:HISTORY_QUERY_VUS='250'; docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark
@@ -345,10 +487,17 @@ k6 valida status, `Content-Type`, JSON y contrato esperado. Muestra duración, t
 checks, avg, mediana, p90, p95, p99 y máximo por fase. Los thresholds exigen cero estados inesperados,
 5xx, contratos inválidos e iteraciones descartadas; más de 99 % de checks y menos de 1 % de fallos HTTP.
 
-Dos ejecuciones locales —la segunda conservando el volumen— completaron exactamente
-1.000/20.000/15.000 peticiones, 100 % de checks y 0 % de errores en unos 38 segundos. Con 500 VUs, la
-API utilizó aproximadamente su límite de una CPU. Los percentiles, consumo y limitaciones están en
-[docs/performance-results.md](docs/performance-results.md); no son un SLA ni una predicción universal.
+La línea base sin seguridad permanece en [docs/performance-results.md](docs/performance-results.md).
+Dos ejecuciones JWT —la segunda conservando el volumen— completaron exactamente
+1.000/20.000/15.000 peticiones, 100 % de checks y 0 % de errores en 63 y 57 segundos. Con 500 VUs,
+la API utilizó aproximadamente su límite de una CPU; RS256 por petición tuvo un coste medible.
+La comparación está en [docs/jwt-security-results.md](docs/jwt-security-results.md); no es un SLA.
+Cambiar de claves fijas a un par local generado no altera RS256 ni el coste por petición, por lo que
+estas cifras no se repitieron.
+
+La comparación equivalente de esta rama con Redis, incluidos TTL, claves, invalidación, fail-open y
+recursos, está en [docs/redis-cache-results.md](docs/redis-cache-results.md). Redis es una mejora bonus;
+la entrega base de `master` no lo requiere.
 
 Cada ejecución añade datos únicos al volumen. Para repetir desde una base vacía, debe ejecutarse
 explícitamente `docker compose down -v`; el script k6 no elimina datos ni accede directamente a
@@ -368,7 +517,7 @@ PostgreSQL.
   ceremoniales para cada clase.
 - **Sin relaciones JPA navegables:** evita cargar historiales o productos cuando la operación solo
   necesita un valor o un `productId`.
-- **Consultas específicas:** el precio vigente proyecta únicamente `value`; el historial se recupera
+- **Consultas específicas:** el precio vigente recupera solo la fila temporal y su moneda; el historial se recupera
   ordenado por `initDate` e `id`.
 - **Exclusión PostgreSQL:** mantiene la invariante de solapamiento bajo concurrencia, donde una
   comprobación Java aislada no sería suficiente.
@@ -396,16 +545,99 @@ performance                        # Script k6 reproducible
 docs                               # Resultados y análisis de rendimiento
 ```
 
+## Bonus: Multiple currencies and historical conversion
+
+Esta funcionalidad procede de `feature/exchange-currency` y se integra aquí con Redis y JWT.
+`master` mantiene la entrega base sin esta funcionalidad.
+
+Cada precio conserva una moneda original de un conjunto cerrado: `EUR`, `USD`, `GBP`, `JPY` y
+`CHF`. Si `currency` se omite o se envía como `null` al crear un precio, el adaptador REST aplica
+`EUR` para conservar compatibilidad con los clientes y con el benchmark originales. Los códigos se
+aceptan sin distinguir mayúsculas/minúsculas, pero PostgreSQL siempre almacena el enum en mayúsculas.
+
+Creación explícita:
+
+```bash
+curl -X POST http://localhost:8080/products/1/prices \
+  -H 'Content-Type: application/json' \
+  -d '{"value":99.99,"currency":"EUR","initDate":"2024-01-01","endDate":"2024-06-30"}'
+```
+
+La lectura sin conversión devuelve exclusivamente el valor y la moneda persistidos:
+
+```bash
+curl 'http://localhost:8080/products/1/prices?date=2024-04-15'
+```
+
+```json
+{"value":99.99,"currency":"EUR"}
+```
+
+La conversión es opcional y solo se admite en el precio vigente:
+
+```bash
+curl 'http://localhost:8080/products/1/prices?date=2024-04-15&currency=USD'
+```
+
+```json
+{
+  "value": 106.74,
+  "currency": "USD",
+  "originalValue": 99.99,
+  "originalCurrency": "EUR",
+  "exchangeRate": 1.0675,
+  "exchangeRateDate": "2024-04-15"
+}
+```
+
+La fecha de la tasa es la misma fecha histórica usada para localizar el precio. La conversión usa
+`BigDecimal`, no redondea la tasa y redondea solo el importe final a dos decimales con
+`RoundingMode.HALF_UP`. Como simplificación del challenge, JPY también conserva dos decimales.
+La conversión no se persiste y el historial nunca se convierte.
+
+El puerto `ExchangeRateProvider` desacopla la aplicación del proveedor. El adaptador HTTP consulta
+primero jsDelivr y, ante timeout, error de red, 5xx, 404 histórico o respuesta inválida, usa el
+fallback oficial de Cloudflare. Solo acepta una respuesta cuya fecha coincida con la solicitada.
+Los timeouts por defecto son 2 s para conexión y 3 s para lectura:
+
+- `EXCHANGE_API_PRIMARY_URL`
+- `EXCHANGE_API_FALLBACK_URL`
+- `EXCHANGE_API_CONNECT_TIMEOUT`
+- `EXCHANGE_API_READ_TIMEOUT`
+
+Las plantillas de URL deben contener `{date}` y `{base}`. Si ambos proveedores fallan, la API
+responde `503 SERVICE_UNAVAILABLE` sin exponer URLs ni cuerpos externos. Una moneda fuera del enum
+responde `400 VALIDATION_ERROR`. Cuando origen y destino coinciden se usa tasa 1 sin llamada externa.
+
+Flyway V2 añade `prices.currency VARCHAR(3)`, migra filas existentes a EUR y aplica `NOT NULL` y
+`chk_prices_currency`. La moneda no participa en `ex_prices_product_validity`: dos intervalos
+solapados del mismo producto siguen siendo inválidos aunque tengan monedas distintas.
+
+El benchmark conserva exactamente sus fases, fechas, cantidades y VUs originales. Sus requests de
+precio siguen omitiendo `currency` para verificar compatibilidad, y sus checks esperan EUR. No
+ejecuta conversiones ni depende del proveedor externo.
+
+Más detalles de diseño y validación:
+[docs/exchange-currency-results.md](docs/exchange-currency-results.md).
+
+Las decisiones y validaciones del conjunto están en
+[docs/bonus-track-results.md](docs/bonus-track-results.md).
+
+Limitaciones específicas: el proveedor gratuito no ofrece SLA; no hay caché de tasas, criptomonedas,
+conversión del historial ni reglas de decimales por divisa. PostgreSQL sigue siendo la fuente del
+precio original; el proveedor externo solo aporta tasas.
+
 ## Limitaciones y posibles mejoras
 
-El alcance actual implementa los cuatro endpoints obligatorios, Swagger/OpenAPI y el bonus de
-rendimiento. No incluye deliberadamente autenticación, moneda, paginación, actualización o borrado.
+Esta rama integra los cuatro endpoints obligatorios, multidivisa, conversión histórica, Redis y JWT.
+No incluye gestión de usuarios, emisión o revocación inmediata de tokens, paginación, actualización
+o borrado.
 
 Si el producto evolucionara, podrían valorarse:
 
-- OAuth2/JWT.
+- Integración con un proveedor de identidad productivo y rotación de claves.
 - Paginación del historial.
-- Moneda explícita y sus reglas.
+- Caché de tasas de cambio.
 - Actualización o eliminación de precios.
 - Observabilidad y alertas.
 - Despliegue cloud y pipeline CI/CD.
@@ -417,11 +649,13 @@ Estas opciones no eran necesarias para el challenge y no se presentan como funci
 
 | Objetivo | Comando |
 |---|---|
-| Levantar API y PostgreSQL | `docker compose up -d --build postgres app` |
+| Generar claves JWT locales | `java tools/jwt/GenerateDevKeys.java` |
+| Levantar API, PostgreSQL y Redis | `docker compose up -d --build postgres redis app` |
 | Ver estado | `docker compose ps` |
 | Ver logs de la API | `docker compose logs app` |
 | Detener conservando datos | `docker compose down` |
 | Detener y borrar datos | `docker compose down -v` |
 | Tests rápidos en Windows | `.\mvnw.cmd test` |
 | Suite completa en Windows | `.\mvnw.cmd verify` |
-| Benchmark | `docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark` |
+| Generar writer JWT (PowerShell) | `$env:ACCESS_TOKEN = java tools/jwt/GenerateToken.java writer` |
+| Benchmark (requiere ACCESS_TOKEN) | `docker compose --profile benchmark up --build --abort-on-container-exit --exit-code-from benchmark` |

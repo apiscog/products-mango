@@ -1,17 +1,24 @@
 package com.mango.products.adapter.in.web;
 
 import com.mango.products.adapter.in.web.error.GlobalExceptionHandler;
+import com.mango.products.adapter.in.web.security.JsonAccessDeniedHandler;
+import com.mango.products.adapter.in.web.security.JsonAuthenticationEntryPoint;
+import com.mango.products.adapter.in.web.security.SecurityConfiguration;
+import com.mango.products.adapter.in.web.security.SecurityErrorResponseWriter;
 import com.mango.products.application.exception.PriceNotFoundException;
 import com.mango.products.application.exception.PriceOverlapException;
 import com.mango.products.application.exception.ProductNotFoundException;
+import com.mango.products.application.exception.ExchangeRateUnavailableException;
 import com.mango.products.application.port.in.ProductUseCases;
 import com.mango.products.application.port.in.command.AddPriceCommand;
 import com.mango.products.application.port.in.command.CreateProductCommand;
 import com.mango.products.application.port.in.result.CurrentPriceResult;
+import com.mango.products.application.port.in.result.ConvertedPriceResult;
 import com.mango.products.application.port.in.result.PriceResult;
 import com.mango.products.application.port.in.result.ProductHistoryResult;
 import com.mango.products.application.port.in.result.ProductResult;
 import com.mango.products.domain.exception.DomainValidationException;
+import com.mango.products.domain.model.CurrencyCode;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -19,6 +26,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.security.test.context.support.WithMockUser;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -40,8 +48,19 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@WebMvcTest(ProductController.class)
-@Import(GlobalExceptionHandler.class)
+@WebMvcTest(value = ProductController.class, properties = {
+        "products.security.jwt.public-key-location=classpath:security/test-public-key.pem",
+        "products.security.jwt.issuer=products-challenge-dev",
+        "products.security.jwt.audience=products-api"
+})
+@Import({
+        GlobalExceptionHandler.class,
+        SecurityConfiguration.class,
+        SecurityErrorResponseWriter.class,
+        JsonAuthenticationEntryPoint.class,
+        JsonAccessDeniedHandler.class
+})
+@WithMockUser(authorities = {"SCOPE_products.read", "SCOPE_products.write"})
 class ProductControllerTest {
 
     private static final LocalDate INIT_DATE = LocalDate.of(2024, 1, 1);
@@ -111,16 +130,17 @@ class ProductControllerTest {
 
     @Test
     void addsPriceAndReturnsExactContract() throws Exception {
-        AddPriceCommand command = new AddPriceCommand(new BigDecimal("99.99"), INIT_DATE, END_DATE);
+        AddPriceCommand command = new AddPriceCommand(new BigDecimal("99.99"), CurrencyCode.EUR, INIT_DATE, END_DATE);
         when(productUseCases.addPrice(1L, command))
-                .thenReturn(new PriceResult(new BigDecimal("99.99"), INIT_DATE, END_DATE));
+                .thenReturn(new PriceResult(new BigDecimal("99.99"), CurrencyCode.EUR, INIT_DATE, END_DATE));
 
         mockMvc.perform(post("/products/1/prices")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(validPriceJson("99.99", "\"2024-06-30\"")))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.*", hasSize(3)))
+                .andExpect(jsonPath("$.*", hasSize(4)))
                 .andExpect(jsonPath("$.value").value(99.99))
+                .andExpect(jsonPath("$.currency").value("EUR"))
                 .andExpect(jsonPath("$.initDate").value("2024-01-01"))
                 .andExpect(jsonPath("$.endDate").value("2024-06-30"));
 
@@ -129,9 +149,9 @@ class ProductControllerTest {
 
     @Test
     void keepsNullEndDateInAddPriceResponse() throws Exception {
-        AddPriceCommand command = new AddPriceCommand(new BigDecimal("99.99"), INIT_DATE, null);
+        AddPriceCommand command = new AddPriceCommand(new BigDecimal("99.99"), CurrencyCode.EUR, INIT_DATE, null);
         when(productUseCases.addPrice(1L, command))
-                .thenReturn(new PriceResult(new BigDecimal("99.99"), INIT_DATE, null));
+                .thenReturn(new PriceResult(new BigDecimal("99.99"), CurrencyCode.EUR, INIT_DATE, null));
 
         mockMvc.perform(post("/products/1/prices")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -170,7 +190,7 @@ class ProductControllerTest {
 
     @Test
     void mapsDomainDateValidationToBadRequest() throws Exception {
-        AddPriceCommand command = new AddPriceCommand(new BigDecimal("99.99"), INIT_DATE, INIT_DATE);
+        AddPriceCommand command = new AddPriceCommand(new BigDecimal("99.99"), CurrencyCode.EUR, INIT_DATE, INIT_DATE);
         when(productUseCases.addPrice(1L, command))
                 .thenThrow(new DomainValidationException("initDate must be before endDate"));
 
@@ -184,7 +204,7 @@ class ProductControllerTest {
 
     @Test
     void mapsMissingProductWhenAddingPriceToNotFound() throws Exception {
-        when(productUseCases.addPrice(99L, new AddPriceCommand(new BigDecimal("99.99"), INIT_DATE, null)))
+        when(productUseCases.addPrice(99L, new AddPriceCommand(new BigDecimal("99.99"), CurrencyCode.EUR, INIT_DATE, null)))
                 .thenThrow(new ProductNotFoundException(99L));
 
         performAddPrice(99L, validPriceJson("99.99", "null"))
@@ -196,7 +216,7 @@ class ProductControllerTest {
 
     @Test
     void mapsOverlappingPriceToConflictWithoutInternalDetails() throws Exception {
-        when(productUseCases.addPrice(1L, new AddPriceCommand(new BigDecimal("99.99"), INIT_DATE, END_DATE)))
+        when(productUseCases.addPrice(1L, new AddPriceCommand(new BigDecimal("99.99"), CurrencyCode.EUR, INIT_DATE, END_DATE)))
                 .thenThrow(new PriceOverlapException(1L, INIT_DATE, END_DATE));
 
         mockMvc.perform(post("/products/1/prices")
@@ -221,13 +241,14 @@ class ProductControllerTest {
     void returnsOnlyCurrentPriceValueForIsoDate() throws Exception {
         LocalDate date = LocalDate.of(2024, 4, 15);
         when(productUseCases.getPriceAtDate(1L, date))
-                .thenReturn(new CurrentPriceResult(new BigDecimal("99.99")));
+                .thenReturn(new CurrentPriceResult(new BigDecimal("99.99"), CurrencyCode.EUR));
 
         mockMvc.perform(get("/products/1/prices").param("date", "2024-04-15"))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.*", hasSize(1)))
-                .andExpect(jsonPath("$.value").value(99.99));
+                .andExpect(jsonPath("$.*", hasSize(2)))
+                .andExpect(jsonPath("$.value").value(99.99))
+                .andExpect(jsonPath("$.currency").value("EUR"));
 
         verify(productUseCases).getPriceAtDate(1L, date);
         verify(productUseCases, never()).getPriceHistory(any(Long.class));
@@ -283,8 +304,8 @@ class ProductControllerTest {
                 "Zapatillas deportivas",
                 "Modelo 2025 edición limitada",
                 List.of(
-                        new PriceResult(new BigDecimal("99.99"), INIT_DATE, END_DATE),
-                        new PriceResult(new BigDecimal("109.99"), LocalDate.of(2024, 7, 1), null)
+                        new PriceResult(new BigDecimal("99.99"), CurrencyCode.EUR, INIT_DATE, END_DATE),
+                        new PriceResult(new BigDecimal("109.99"), CurrencyCode.EUR, LocalDate.of(2024, 7, 1), null)
                 )
         ));
 
@@ -294,8 +315,9 @@ class ProductControllerTest {
                 .andExpect(jsonPath("$.name").value("Zapatillas deportivas"))
                 .andExpect(jsonPath("$.description").value("Modelo 2025 edición limitada"))
                 .andExpect(jsonPath("$.prices", hasSize(2)))
-                .andExpect(jsonPath("$.prices[0].*", hasSize(3)))
+                .andExpect(jsonPath("$.prices[0].*", hasSize(4)))
                 .andExpect(jsonPath("$.prices[0].value").value(99.99))
+                .andExpect(jsonPath("$.prices[0].currency").value("EUR"))
                 .andExpect(jsonPath("$.prices[0].initDate").value("2024-01-01"))
                 .andExpect(jsonPath("$.prices[0].endDate").value("2024-06-30"))
                 .andExpect(jsonPath("$.prices[1].value").value(109.99))
@@ -324,6 +346,89 @@ class ProductControllerTest {
         mockMvc.perform(get("/products/99/prices"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("PRODUCT_NOT_FOUND"));
+    }
+
+    @Test
+    void normalizesExplicitLowercaseCurrency() throws Exception {
+        AddPriceCommand command = new AddPriceCommand(
+                new BigDecimal("99.99"), CurrencyCode.USD, INIT_DATE, END_DATE);
+        when(productUseCases.addPrice(1L, command))
+                .thenReturn(new PriceResult(
+                        new BigDecimal("99.99"), CurrencyCode.USD, INIT_DATE, END_DATE));
+
+        mockMvc.perform(post("/products/1/prices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"value":99.99,"currency":"usd",
+                                 "initDate":"2024-01-01","endDate":"2024-06-30"}
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.currency").value("USD"));
+        verify(productUseCases).addPrice(1L, command);
+    }
+
+    @Test
+    void rejectsBlankAndUnsupportedPriceCurrency() throws Exception {
+        for (String currency : List.of("", "EU", "CAD")) {
+            mockMvc.perform(post("/products/1/prices")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("""
+                                    {"value":99.99,"currency":"%s",
+                                     "initDate":"2024-01-01","endDate":"2024-06-30"}
+                                    """.formatted(currency)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+        }
+        verifyNoInteractions(productUseCases);
+    }
+
+    @Test
+    void acceptsCaseInsensitiveCurrencyAndReturnsConvertedPrice() throws Exception {
+        LocalDate date = LocalDate.of(2024, 4, 15);
+        when(productUseCases.getPriceAtDate(1L, date, CurrencyCode.USD))
+                .thenReturn(new ConvertedPriceResult(
+                        new BigDecimal("106.74"), CurrencyCode.USD,
+                        new BigDecimal("99.99"), CurrencyCode.EUR,
+                        new BigDecimal("1.0675"), date));
+
+        mockMvc.perform(get("/products/1/prices")
+                        .param("date", "2024-04-15")
+                        .param("currency", "usd"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.*", hasSize(6)))
+                .andExpect(jsonPath("$.value").value(106.74))
+                .andExpect(jsonPath("$.currency").value("USD"))
+                .andExpect(jsonPath("$.originalValue").value(99.99))
+                .andExpect(jsonPath("$.originalCurrency").value("EUR"))
+                .andExpect(jsonPath("$.exchangeRate").value(1.0675))
+                .andExpect(jsonPath("$.exchangeRateDate").value("2024-04-15"));
+    }
+
+    @Test
+    void rejectsUnsupportedCurrencyBeforeCallingUseCase() throws Exception {
+        mockMvc.perform(get("/products/1/prices")
+                        .param("date", "2024-04-15")
+                        .param("currency", "CAD"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message").value(
+                        "Unsupported currency 'CAD'. Supported currencies: EUR, USD, GBP, JPY, CHF"));
+        verifyNoInteractions(productUseCases);
+    }
+
+    @Test
+    void mapsUnavailableExchangeProviderToServiceUnavailable() throws Exception {
+        LocalDate date = LocalDate.of(2024, 4, 15);
+        when(productUseCases.getPriceAtDate(1L, date, CurrencyCode.USD))
+                .thenThrow(new ExchangeRateUnavailableException());
+
+        mockMvc.perform(get("/products/1/prices")
+                        .param("date", "2024-04-15")
+                        .param("currency", "USD"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("SERVICE_UNAVAILABLE"))
+                .andExpect(jsonPath("$.message").value("Currency conversion is temporarily unavailable"))
+                .andExpect(jsonPath("$.path").value("/products/1/prices"));
     }
 
     @Test

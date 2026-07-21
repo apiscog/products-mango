@@ -3,6 +3,7 @@ package com.mango.products.adapter.in.web.error;
 import com.mango.products.application.exception.PriceNotFoundException;
 import com.mango.products.application.exception.PriceOverlapException;
 import com.mango.products.application.exception.ProductNotFoundException;
+import com.mango.products.application.exception.ExchangeRateUnavailableException;
 import com.mango.products.domain.exception.DomainValidationException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolation;
@@ -14,6 +15,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.bind.UnsatisfiedServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
@@ -93,6 +95,20 @@ public class GlobalExceptionHandler {
         );
     }
 
+    @ExceptionHandler(UnsatisfiedServletRequestParameterException.class)
+    public ResponseEntity<ApiErrorResponse> handleUnsatisfiedParameters(
+            UnsatisfiedServletRequestParameterException exception,
+            HttpServletRequest request
+    ) {
+        return error(
+                HttpStatus.BAD_REQUEST,
+                "VALIDATION_ERROR",
+                "Request validation failed",
+                request,
+                List.of()
+        );
+    }
+
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ApiErrorResponse> handleUnreadableMessage(
             HttpMessageNotReadableException exception,
@@ -126,6 +142,20 @@ public class GlobalExceptionHandler {
                 HttpStatus.CONFLICT,
                 "PRICE_OVERLAP",
                 "The price period overlaps an existing price",
+                request,
+                List.of()
+        );
+    }
+
+    @ExceptionHandler(ExchangeRateUnavailableException.class)
+    public ResponseEntity<ApiErrorResponse> handleExchangeRateUnavailable(
+            ExchangeRateUnavailableException exception,
+            HttpServletRequest request
+    ) {
+        return error(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "SERVICE_UNAVAILABLE",
+                "Currency conversion is temporarily unavailable",
                 request,
                 List.of()
         );
