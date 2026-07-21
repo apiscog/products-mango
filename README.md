@@ -55,6 +55,11 @@ Por ejemplo:
 - Bash y `curl` para el benchmark oficial.
 - Grafana k6 1.7.1 para la prueba de carga complementaria.
 
+Java 21 y Spring Boot dan una base sólida: rendimiento y compatibilidad LTS, ecosistema maduro para seguridad, validación y generación de OpenAPI/Swagger que aceleran el desarrollo y las pruebas. 
+PostgreSQL se eligió por razones de dominio ya que sus tipos de rango y la restricción EXCLUDE permiten garantizar la invariante de no-solapamiento incluso bajo concurrencia, algo que otras BBDD no replican en tests reales. 
+Redis aporta una capa de caché para reducir latencias en lecturas frecuentes sin complicar la coherencia de negocio. Finalmente, Flyway y Testcontainers aseguran migraciones reproducibles y suites de integración que validan restricciones reales.
+Además la arquitectura hexagonal mantiene el dominio desacoplado de la infraestructura, facilitando pruebas unitarias rápidas y evolución segura.
+
 ## Estado de las ramas
 
 Actualmente he integrado la rama "feature/bonus-track" en la rama `master`, que incluye:
