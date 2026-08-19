@@ -783,16 +783,9 @@ Flyway se ejecuta también en este modo. Para revisar el challenge, Compose comp
 
 El alcance actual no incluye:
 
-- Gestión de usuarios.
-- Emisión, refresh o revocación inmediata de tokens.
 - Paginación.
 - Actualización o eliminación de precios.
 - Conversión del historial.
-- Criptomonedas.
-- Reglas de decimales específicas por divisa.
-- Un SLA sobre el proveedor gratuito de cambio.
-
-En una evolución tendría sentido valorar un IdP real y rotación de claves, paginación del historial, caché de tasas, observabilidad y alertas, CI/CD y despliegue cloud. Un API Gateway solo tendría sentido si el sistema creciera hacia varios servicios. Son posibles líneas de trabajo, no funcionalidades implementadas.
 
 ## Comandos útiles
 
