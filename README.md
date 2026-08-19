@@ -43,12 +43,9 @@ No hace falta instalar PostgreSQL, Redis ni Maven en el host.
 
 Esta es la ruta mínima para evaluar la entrega: prepara la seguridad local, construye la aplicación, comprueba que está saludable, ejecuta un flujo funcional y lanza las suites de tests.
 
-#### 1. Clonar y comprobar el entorno
+#### 1. Comprobar el entorno para correcta apertura del proyecto
 
 ```bash
-git clone https://github.com/apiscog/products-mango.git
-cd products-mango
-
 docker --version
 docker compose version
 java -version
