@@ -16,8 +16,6 @@ La parte central de la solución no es el CRUD, sino la consistencia temporal ya
 - Expone errores homogéneos, OpenAPI, Swagger UI y healthcheck.
 - Incluye tests unitarios, de integración y E2E, además del benchmark del challenge y una prueba complementaria con k6.
 
-La solución integrada está en `master`. Las ramas `feature/exchange-currency`, `feature/redis-cache`, `feature/jwt-security` y `feature/bonus-track` conservan la evolución incremental de los bonus.
-
 ## Stack
 
 - Java 21 y Spring Boot 3.5.15.
